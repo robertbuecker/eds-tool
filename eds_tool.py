@@ -72,6 +72,11 @@ class NavigatorWidget(QtWidgets.QWidget):
 
         self.update_plot(0)
 
+        # Report for selected button
+        self.report_btn = QtWidgets.QPushButton("Report for selected")
+        layout.addWidget(self.report_btn)
+        self.report_btn.clicked.connect(self.make_report)
+
     @property
     def fig(self) -> matplotlib.figure.Figure | None:
         if self.signal._plot is None:
@@ -291,6 +296,53 @@ class NavigatorWidget(QtWidgets.QWidget):
         if self.fig is not None:
             plt.close(self.fig)
         event.accept()
+
+    def make_report(self):
+        idx = self.list.currentRow()
+        # Slice out the single-spectrum signal
+        single_signal = self.signal.inav[idx]
+        # Set the title to the basename
+        single_signal.metadata.set_item("General.title", os.path.basename(self.filenames[idx]))
+        # Slice out the corresponding model if available
+        single_model = None
+        if self.model is not None:
+            single_model = self.model.inav[idx]
+            single_model.signal.metadata.set_item("General.title", os.path.basename(self.filenames[idx]))
+            
+        # Get the figure handle
+        fig = self.fig
+        # Get the full path
+        full_path = self.filenames[idx]
+        # Optionally pass the axes object
+        ax = self.ax
+        # Instantiate the report
+        report = EDSReport(single_signal, single_model, ax, fig, full_path)
+
+class EDSReport:
+    def __init__(self, signal, model=None, ax=None, fig=None, full_path=None):
+        self.signal = signal
+        self.model = model
+        self.ax = ax
+        self.fig = fig
+        self.full_path = full_path
+        print("EDSReport created:")
+        print("Signal:", repr(self.signal))
+        if self.model is not None:
+            print("Model:", repr(self.model))
+        else:
+            print("Model: None")
+        if self.ax is not None:
+            print("Axes:", repr(self.ax))
+        else:
+            print("Axes: None")
+        if self.fig is not None:
+            print("Figure:", repr(self.fig))
+        else:
+            print("Figure: None")
+        if self.full_path is not None:
+            print("Full path:", self.full_path)
+        else:
+            print("Full path: None")
 
 def main():
     from glob import glob
