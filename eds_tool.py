@@ -171,6 +171,10 @@ class NavigatorWidget(QtWidgets.QWidget):
 
     def compute_intensities(self):
         # Estimate background windows and compute intensities
+        if not self.signal.metadata.get_item('Sample.elements', default=[]):
+            QtWidgets.QMessageBox.warning(self, "No Elements Defined", "Please define elements first before computing intensities.")
+            return
+        
         bw = self.signal.estimate_background_windows()
         intensities = self.signal.get_lines_intensity(background_windows=bw)
 
