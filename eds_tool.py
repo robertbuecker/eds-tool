@@ -4,9 +4,17 @@ import hyperspy.api as hs
 import matplotlib, matplotlib.figure, matplotlib.axes
 matplotlib.use('QtAgg')
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 import exspy
 import os
 import argparse
+import svgutils.transform as sg
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Image, Spacer, Paragraph
+from reportlab.platypus import Table as RLTable
+from reportlab.lib.styles import getSampleStyleSheet
 
 class NavigatorWidget(QtWidgets.QWidget):
 
@@ -54,6 +62,12 @@ class NavigatorWidget(QtWidgets.QWidget):
         layout.addWidget(self.log_checkbox)
         self.log_checkbox.stateChanged.connect(self.toggle_log_y)
 
+        # Show Residual checkbox
+        self.residual_checkbox = QtWidgets.QCheckBox("Show Residual")
+        layout.addWidget(self.residual_checkbox)
+        self.residual_checkbox.setChecked(True)
+        self.residual_checkbox.stateChanged.connect(self.toggle_residual)
+
         # Reset Zoom button
         self.reset_zoom_btn = QtWidgets.QPushButton("Reset Zoom")
         layout.addWidget(self.reset_zoom_btn)
@@ -76,6 +90,11 @@ class NavigatorWidget(QtWidgets.QWidget):
         self.report_btn = QtWidgets.QPushButton("Report for selected")
         layout.addWidget(self.report_btn)
         self.report_btn.clicked.connect(self.make_report)
+
+        # Report for all button
+        self.report_all_btn = QtWidgets.QPushButton("Report for all")
+        layout.addWidget(self.report_all_btn)
+        self.report_all_btn.clicked.connect(self.make_report_all)
 
     @property
     def fig(self) -> matplotlib.figure.Figure | None:
@@ -117,9 +136,13 @@ class NavigatorWidget(QtWidgets.QWidget):
                 xlim, ylim, yscale, win_geom = None, None, None, None
                 
             if self.model is None:
-                self.signal.plot(True, navigator=None)             # type: ignore
+                self.signal.plot(True, navigator=None)
             else:
-                self.model.plot(xray_lines=True, plot_residual=True, navigator=None)
+                self.model.plot(
+                    xray_lines=True,
+                    plot_residual=self.residual_checkbox.isChecked(),
+                    navigator=None
+                )
                 
             plt.show(block=False)
 
@@ -244,7 +267,9 @@ class NavigatorWidget(QtWidgets.QWidget):
         table = QtWidgets.QTableWidget(dialog)
         table.setRowCount(len(table_data))
         table.setColumnCount(len(line_names) + 1)
-        table.setHorizontalHeaderLabels(["Spectrum"] + line_names)
+        
+        header = ["Spectrum"] + line_names
+        table.setHorizontalHeaderLabels(header)
 
         # Use fixed-width font for all items
         font = table.font()
@@ -282,6 +307,9 @@ class NavigatorWidget(QtWidgets.QWidget):
                 self.ax.set_ylim(bottom=1)  # Avoid log(0)
             self.fig.canvas.draw_idle()
 
+    def toggle_residual(self):
+        self.update_plot(self.list.currentRow(), force_replot=True)
+
     def reset_zoom(self):
         if self.ax is not None:
             # X axis: full energy range
@@ -302,51 +330,94 @@ class NavigatorWidget(QtWidgets.QWidget):
         event.accept()
 
     def make_report(self):
-        idx = self.list.currentRow()
-        # Slice out the single-spectrum signal
-        single_signal = self.signal.inav[idx]
-        # Set the title to the basename
-        single_signal.metadata.set_item("General.title", os.path.basename(self.filenames[idx]))
-        # Slice out the corresponding model if available
-        single_model = None
-        if self.model is not None:
-            single_model = self.model.inav[idx]
-            single_model.signal.metadata.set_item("General.title", os.path.basename(self.filenames[idx]))
-            
-        # Get the figure handle
-        fig = self.fig
-        # Get the full path
-        full_path = self.filenames[idx]
-        # Optionally pass the axes object
-        ax = self.ax
-        # Instantiate the report
-        report = EDSReport(single_signal, single_model, ax, fig, full_path)
+        report = EDSReport(self.signal, self.model, self.filenames)
+        report.export_report(spectrum_idx=self.list.currentRow())
+
+    def make_report_all(self):
+        report = EDSReport(self.signal, self.model, self.filenames)
+        indices = list(range(len(self.filenames)))
+        report.export_report(spectrum_idx=indices)
 
 class EDSReport:
-    def __init__(self, signal, model=None, ax=None, fig=None, full_path=None):
+    def __init__(self, signal, model=None, paths=None):
         self.signal = signal
         self.model = model
-        self.ax = ax
-        self.fig = fig
-        self.full_path = full_path
-        print("EDSReport created:")
-        print("Signal:", repr(self.signal))
+        self.paths = paths
+
+    def export_report(self, spectrum_idx: int | list[int] = 0, pdf_path=None):
+        
+        if isinstance(spectrum_idx, list):
+            for idx in spectrum_idx:
+                self.export_report(idx, pdf_path=None)
+            return        
+        
+        # Get line intensities from the full model or signal
         if self.model is not None:
-            print("Model:", repr(self.model))
+            intensities = self.model.get_lines_intensity()
         else:
-            print("Model: None")
-        if self.ax is not None:
-            print("Axes:", repr(self.ax))
-        else:
-            print("Axes: None")
-        if self.fig is not None:
-            print("Figure:", repr(self.fig))
-        else:
-            print("Figure: None")
-        if self.full_path is not None:
-            print("Full path:", self.full_path)
-        else:
-            print("Full path: None")
+            intensities = self.signal.get_lines_intensity()
+
+        if pdf_path is None:
+            pdf_path = os.path.splitext(self.paths[spectrum_idx])[0] + '.pdf'
+            
+        spectrum_name = os.path.splitext(os.path.basename(self.paths[spectrum_idx]))[0]
+        
+        # Prepare transposed table data: one row per line (no energy)
+        table_data = [["Line", "Intensity"]]
+        for sig in intensities:
+            line = sig.metadata.get_item('Sample.xray_lines')[0]
+            val = sig.data[spectrum_idx]
+            table_data.append([line, f"{val:.1f}"])
+
+        # Split table into two columns if too long
+        n = len(table_data)
+        split = (n + 1) // 2
+        left_table = table_data[:split]
+        right_table = table_data[0:1] + table_data[split:]  # repeat header for right table
+
+        # Create PDF
+        doc = SimpleDocTemplate(pdf_path, pagesize=A4)
+        elements = []
+        styles = getSampleStyleSheet()
+        elements.append(Paragraph(f"EDS Spectrum and Intensities<br/><b>{spectrum_name}</b>", styles['Title']))
+        elements.append(Spacer(1, 0.2 * inch))
+
+        # Save the current figure as PNG and preserve aspect ratio
+        plot_png = pdf_path.replace('.pdf', '_spectrum.png')
+        plot_pdf = pdf_path.replace('.pdf', '_spectrum.pdf')
+        
+        fig = self.signal._plot.signal_plot.figure if self.signal._plot and self.signal._plot.signal_plot else None
+        
+        if fig is not None:
+            fig.savefig(plot_png, dpi=600)
+            fig.savefig(plot_pdf)
+            fig_width_inch, fig_height_inch = fig.get_size_inches()
+            pdf_img_width = 6.5 * inch
+            pdf_img_height = pdf_img_width * (fig_height_inch / fig_width_inch)
+            elements.append(Image(plot_png, width=pdf_img_width, height=pdf_img_height))
+            elements.append(Spacer(1, 0.2 * inch))
+
+        # Add left and right tables side by side
+        tbl_left = Table(left_table, hAlign='LEFT')
+        tbl_right = Table(right_table, hAlign='LEFT')
+        style = TableStyle([
+            ('FONTNAME', (0,0), (-1,-1), 'Courier'),
+            ('FONTSIZE', (0,0), (-1,-1), 10),
+            ('ALIGN', (1,0), (1,-1), 'RIGHT'),
+            ('ALIGN', (0,0), (0,-1), 'LEFT'),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+            ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
+        ])
+        tbl_left.setStyle(style)
+        tbl_right.setStyle(style)
+
+        elements.append(Table([[tbl_left, tbl_right]], colWidths=[3*inch, 3*inch]))
+        elements.append(Spacer(1, 0.2 * inch))
+
+        doc.build(elements)
+        print(f"PDF report saved to {pdf_path}")
+        if sys.platform.startswith("win"):
+            os.startfile(pdf_path)
 
 def main():
     from glob import glob
@@ -364,6 +435,8 @@ def main():
             paths.extend(glob(os.path.join(p,'**','*.eds'), recursive=True))    
     
     specs = hs.load(paths, stack=True) # pyright: ignore[reportCallIssue]
+    specs.metadata['General']['title'] = os.path.basename(os.path.commonpath(paths))
+    
     if args.elements:
         specs.add_elements([e.strip() for e in args.elements.split(',') if e.strip()])
 
