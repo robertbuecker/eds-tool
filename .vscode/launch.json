@@ -17,8 +17,8 @@
             "request": "launch",
             "program": "eds_tool.py",
             "args": [
-                "C:\\XcaliburData\\EDS-test\\AlFeGa-acac-1\\exp_7990.EDS",
-                "C:\\XcaliburData\\EDS-test\\AlFeGa-acac-1\\exp_7991.EDS",
+                "C:\\XcaliburData\\EDS-test\\AlFeGa-acac-1\\exp_7990\\exp_7990.EDS",
+                "C:\\XcaliburData\\EDS-test\\AlFeGa-acac-1\\exp_7991\\exp_7991.EDS",
                 "--elements","Fe,Cu,Au,Cr,C,N,O,Al,Ga"
             ],
             "console": "integratedTerminal"

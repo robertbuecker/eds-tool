@@ -1,169 +1,225 @@
 import sys
 from qtpy import QtWidgets, QtCore
-import hyperspy.api as hs
-import matplotlib, matplotlib.figure, matplotlib.axes
+import matplotlib
 matplotlib.use('QtAgg')
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 import exspy
 import os
 import argparse
-import svgutils.transform as sg
-from reportlab.lib.pagesizes import A4
-from reportlab.lib import colors
-from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Image, Spacer, Paragraph
-from reportlab.platypus import Table as RLTable
-from reportlab.lib.styles import getSampleStyleSheet
+from eds_session import EDSSession
+from qtpy.QtGui import QIcon
+
+ICON_PATH = os.path.join(os.path.dirname(__file__), "eds_icon.png")
 
 class NavigatorWidget(QtWidgets.QWidget):
-
-    def __init__(self, signal: exspy.signals.EDSTEMSpectrum, filenames: list[str]):
+    def __init__(self, session: EDSSession):
         super().__init__()
-        self.signal = signal
-        self.filenames = filenames
-        self.model: None | exspy.models.EDSTEMModel = None
-        self.setWindowTitle("EDS signals")  # Changed title
+        self.session = session
+        self.setWindowTitle("EDS signals")
+        self.setWindowIcon(QIcon(ICON_PATH))  # Set icon for navigator
+        self.table_views: dict[str, QtWidgets.QDialog] = {}
         layout = QtWidgets.QVBoxLayout(self)
+        
+        self.popup = QtWidgets.QDialog(self)
+        self.popup.setWindowTitle("X-ray lines")
+        self.popup.setWindowIcon(QIcon(ICON_PATH))  # Set icon for popup
+        self.popup.setModal(False)
+        popup_layout = QtWidgets.QVBoxLayout(self.popup)
+        self.popup_browser = QtWidgets.QTextBrowser()
+        popup_layout.addWidget(self.popup_browser)
+        self.popup_browser.anchorClicked.connect(self._on_popup_link_clicked)        
 
-        # Elements entry
+        # Row 1: Add file | Add directory
+        add_row = QtWidgets.QHBoxLayout()
+        self.add_file_btn = QtWidgets.QPushButton("Add .eds File")
+        self.add_dir_btn = QtWidgets.QPushButton("Add Directory (recursive)")
+        add_row.addWidget(self.add_file_btn)
+        add_row.addWidget(self.add_dir_btn)
+        layout.addLayout(add_row)
+        self.add_file_btn.clicked.connect(self.add_file)
+        self.add_dir_btn.clicked.connect(self.add_directory)
+
+
+        # Row 1a: Elements entry
         el_layout = QtWidgets.QHBoxLayout()
-        self.el_edit = QtWidgets.QLineEdit(",".join(self.signal.metadata.get_item('Sample.elements', default=[]))) # type: ignore
+        self.el_edit = QtWidgets.QLineEdit(",".join(self.session.active_record.elements))
         el_apply = QtWidgets.QPushButton("Apply elements")
         el_layout.addWidget(QtWidgets.QLabel("Elements:"))
         el_layout.addWidget(self.el_edit)
         el_layout.addWidget(el_apply)
         layout.addLayout(el_layout)
         el_apply.clicked.connect(self.apply_elements)
+        layout.addWidget(QtWidgets.QLabel("Right-click spectrum to add elements"))
 
-        # List of spectra (filenames)
+        # Row 2: SPECTRUM LIST
         self.list = QtWidgets.QListWidget()
-        for fname in self.filenames:
-            self.list.addItem(os.path.basename(fname))
+        for name in self.session.records:
+            self.list.addItem(name)
         layout.addWidget(self.list)
-        self.list.currentRowChanged.connect(self.update_plot)
-        self.list.setCurrentRow(0)
-        
-        # Compute Intensities button
-        self.intensity_btn = QtWidgets.QPushButton("Compute Intensities")
-        layout.addWidget(self.intensity_btn)
-        self.intensity_btn.clicked.connect(self.compute_intensities)
+        self.list.currentRowChanged.connect(self.on_spectrum_changed)
 
-        # Fit Spectrum button
-        self.fit_btn = QtWidgets.QPushButton("Fit Spectrum")
-        layout.addWidget(self.fit_btn)
-        self.fit_btn.clicked.connect(self.fit_spectrum)
-        self.remove_fit_btn = QtWidgets.QPushButton("Delete Fit Model")
-        layout.addWidget(self.remove_fit_btn)
-        self.remove_fit_btn.clicked.connect(self.remove_fit)        
+        # Row 3: Remove selected
+        self.remove_spec_btn = QtWidgets.QPushButton("Remove Selected Spectrum")
+        layout.addWidget(self.remove_spec_btn)
+        self.remove_spec_btn.clicked.connect(self.remove_selected_spectrum)
 
-        # Log Y axis checkbox
-        self.log_checkbox = QtWidgets.QCheckBox("Log Y axis")
-        layout.addWidget(self.log_checkbox)
+        # Row 4: Intensities (sel) | Intensities (all)
+        int_row = QtWidgets.QHBoxLayout()
+        self.intensity_btn = QtWidgets.QPushButton("Intensities (sel)")
+        self.intensity_all_btn = QtWidgets.QPushButton("Intensities (all)")
+        int_row.addWidget(self.intensity_btn)
+        int_row.addWidget(self.intensity_all_btn)
+        layout.addLayout(int_row)
+        self.intensity_btn.clicked.connect(self.compute_intensities_active)
+        self.intensity_all_btn.clicked.connect(self.compute_intensities_all)
+
+        # Row 5: Fit (sel) | Fit (all)
+        fit_row = QtWidgets.QHBoxLayout()
+        self.fit_btn = QtWidgets.QPushButton("Fit (sel)")
+        self.fit_all_btn = QtWidgets.QPushButton("Fit (all)")
+        fit_row.addWidget(self.fit_btn)
+        fit_row.addWidget(self.fit_all_btn)
+        layout.addLayout(fit_row)
+        self.fit_btn.clicked.connect(self.fit_spectrum_active)
+        self.fit_all_btn.clicked.connect(self.fit_spectrum_all)
+
+        # Row 6: Delete Fit (sel) | Delete Fit (all)
+        del_row = QtWidgets.QHBoxLayout()
+        self.remove_fit_btn = QtWidgets.QPushButton("Delete Fit (sel)")
+        self.remove_all_fit_btn = QtWidgets.QPushButton("Delete Fit (all)")
+        del_row.addWidget(self.remove_fit_btn)
+        del_row.addWidget(self.remove_all_fit_btn)
+        layout.addLayout(del_row)
+        self.remove_fit_btn.clicked.connect(self.remove_fit_active)
+        self.remove_all_fit_btn.clicked.connect(self.remove_fit_all)
+
+        # Row 7: Horizontal separator
+        sep = QtWidgets.QFrame()
+        sep.setFrameShape(QtWidgets.QFrame.HLine)
+        sep.setFrameShadow(QtWidgets.QFrame.Sunken)
+        layout.addWidget(sep)
+
+        # Row 8: Reset Zoom | Log Y
+        zoom_row = QtWidgets.QHBoxLayout()
+        self.reset_zoom_btn = QtWidgets.QPushButton("Reset Zoom")
+        self.log_checkbox = QtWidgets.QCheckBox("Log Y")
+        zoom_row.addWidget(self.reset_zoom_btn)
+        zoom_row.addWidget(self.log_checkbox)
+        layout.addLayout(zoom_row)
+        self.reset_zoom_btn.clicked.connect(self.reset_zoom)
         self.log_checkbox.stateChanged.connect(self.toggle_log_y)
 
-        # Show Residual checkbox
-        self.residual_checkbox = QtWidgets.QCheckBox("Show Residual")
+        # Row 9: Show fit residual (centered)
+        self.residual_checkbox = QtWidgets.QCheckBox("Show fit residual")
         layout.addWidget(self.residual_checkbox)
         self.residual_checkbox.setChecked(True)
         self.residual_checkbox.stateChanged.connect(self.toggle_residual)
 
-        # Reset Zoom button
-        self.reset_zoom_btn = QtWidgets.QPushButton("Reset Zoom")
-        layout.addWidget(self.reset_zoom_btn)
-        self.reset_zoom_btn.clicked.connect(self.reset_zoom)
+        # Row 10: Intensities (sum) | Intensities (fit)
+        table_row = QtWidgets.QHBoxLayout()
+        self.show_summed_table_checkbox = QtWidgets.QCheckBox("Intensities (sum)")
+        self.show_fitted_table_checkbox = QtWidgets.QCheckBox("Intensities (fit)")
+        table_row.addWidget(self.show_summed_table_checkbox)
+        table_row.addWidget(self.show_fitted_table_checkbox)
+        layout.addLayout(table_row)
+        self.show_summed_table_checkbox.stateChanged.connect(self.toggle_summed_table)
+        self.show_fitted_table_checkbox.stateChanged.connect(self.toggle_fitted_table)
 
-        # Create popup dialog with QTextBrowser
-        self.popup = QtWidgets.QDialog(self)
-        self.popup.setWindowTitle("X-ray lines")
-        self.popup.setModal(False)
-        popup_layout = QtWidgets.QVBoxLayout(self.popup)
-        self.popup_browser = QtWidgets.QTextBrowser()
-        popup_layout.addWidget(self.popup_browser)
-        self.popup_browser.anchorClicked.connect(self._on_popup_link_clicked)
+        # Row 11: Signal unit (Counts/CPS)
+        unit_row = QtWidgets.QHBoxLayout()
+        self.unit_counts_radio = QtWidgets.QRadioButton("Counts")
+        self.unit_cps_radio = QtWidgets.QRadioButton("CPS")
+        unit_row.addWidget(QtWidgets.QLabel("Signal unit:"))
+        unit_row.addWidget(self.unit_counts_radio)
+        unit_row.addWidget(self.unit_cps_radio)
+        layout.addLayout(unit_row)
+
+        self.unit_counts_radio.setChecked(True)  # Default to counts
+        self.unit_counts_radio.toggled.connect(self._on_unit_changed)
+        self.unit_cps_radio.toggled.connect(self._on_unit_changed)
+
+        # Set navigator widget geometry
+        nav_width = 320
+        nav_height = 600
+        self.setFixedSize(nav_width, nav_height)
+
+        # Create dummy figure for window arrangement
+        screen = QtWidgets.QApplication.primaryScreen()
+        screen_geom = screen.availableGeometry()
+        fig_size = nav_height  # Square plot window
+
+        # Center both windows horizontally
+        total_width = nav_width + int(fig_size*1.2) + 40
+        x0 = screen_geom.center().x() - total_width // 2
+        y0 = screen_geom.center().y() - nav_height // 2
+
+        self.move(x0, y0)
+
+        # Create dummy figure and position it
+        self.fig = plt.figure(figsize=(fig_size*1.2 / 100, fig_size / 100), dpi=100)
+        fig_manager = self.fig.canvas.manager
+        fig_win = fig_manager.window
+        fig_win.setWindowIcon(QIcon(ICON_PATH))
+        fig_win.show()  # Show the window so Qt computes the frame geometry
+        QtWidgets.QApplication.processEvents()  # Ensure geometry is updated
+        frame_height = fig_win.frameGeometry().height() - fig_win.geometry().height()
+        fig_win.move(x0 + nav_width + 20, y0)
+        fig_win.resize(int(fig_size*1.2), fig_size)
+        plt.close(self.fig)  # Don't show yet, just store geometry
+
+        self.ax = None
+
+        # Set current row after all widgets are created
+        self.list.setCurrentRow(0)
         
-        self.table_views: dict[str, QtWidgets.QDialog] = {}
+        self.update_plot()
 
-        self.update_plot(0)
+    def on_spectrum_changed(self, idx):
+        if idx < 0 or idx >= self.list.count():
+            return
+        name = self.list.item(idx).text()
+        if self.session.active_name == name:
+            return  # No change, skip recomputation
+        self.session.set_active(name)
+        self.el_edit.setText(",".join(self.session.active_record.elements))
+        # Sync radio buttons
+        quantity = self.session.active_record.signal.metadata.get_item('Signal.quantity', default='X-rays (Counts)')
+        self.unit_counts_radio.setChecked(quantity == 'X-rays (Counts)')
+        self.unit_cps_radio.setChecked(quantity == 'X-rays (CPS)')
+        self.update_plot()
 
-        # Report for selected button
-        self.report_btn = QtWidgets.QPushButton("Report for selected")
-        layout.addWidget(self.report_btn)
-        self.report_btn.clicked.connect(self.make_report)
-
-        # Report for all button
-        self.report_all_btn = QtWidgets.QPushButton("Report for all")
-        layout.addWidget(self.report_all_btn)
-        self.report_all_btn.clicked.connect(self.make_report_all)
-
-    @property
-    def fig(self) -> matplotlib.figure.Figure | None:
-        if self.signal._plot is None:
-            return None
-        fh = self.signal._plot.signal_plot
-        if fh is None:
-            return None
-        return fh.figure # pyright: ignore[reportAttributeAccessIssue]
-
-    @property
-    def ax(self) -> matplotlib.axes.Axes | None:
-        if self.signal._plot is None:
-            return None
-        fh = self.signal._plot.signal_plot
-        if fh is None:
-            return None
-        return fh.ax # pyright: ignore[reportAttributeAccessIssue]
-    
     def apply_elements(self):
         els = [e.strip() for e in self.el_edit.text().split(",") if e.strip()]
-        self.signal.set_elements(els)
-        if self.model is None:
-            self.update_plot(self.list.currentRow(), force_replot=True)
-        else:
-            self.fit_spectrum()
+        self.session.set_elements(els)
+        self.update_plot()
+        # Update tables (they will be empty after element change)
+        if self.show_summed_table_checkbox.isChecked():
+            self.show_summed_intensity_table()
+        if self.show_fitted_table_checkbox.isChecked():
+            self.show_fitted_intensity_table()
 
-    def update_plot(self, idx, force_replot=False):
-                        
-        if force_replot or (self.fig is None):            
-                            
-            if self.ax is not None:
-                assert self.fig is not None
-                xlim, ylim = self.ax.get_xlim(), self.ax.get_ylim()
-                yscale = self.ax.get_yscale()
-                win = self.fig.canvas.manager.window
-                win_geom = win.geometry()
-            else:
-                xlim, ylim, yscale, win_geom = None, None, None, None
-                
-            if self.model is None:
-                self.signal.plot(True, navigator=None)
-            else:
-                self.model.plot(
-                    xray_lines=True,
-                    plot_residual=self.residual_checkbox.isChecked(),
-                    navigator=None
-                )
-                
-            plt.show(block=False)
+    def update_plot(self, force_replot=False):
+        rec = self.session.active_record
+        if rec is None:
+            return
 
-            if xlim is not None:
-                assert (self.fig is not None) and (self.ax is not None)
-                self.ax.set_yscale(yscale)
-                self.ax.set_xlim(xlim)
-                self.ax.set_ylim(ylim)
-                win = self.fig.canvas.manager.window
-                if win_geom:
-                    win.setGeometry(win_geom)
-                                        
-        if self.signal.axes_manager.navigation_dimension:
-            self.signal.axes_manager.indices = (idx,)
-            
-        # Connect right-click handler after plotting
-        if self.fig is not None:
-            self.fig.canvas.mpl_connect("button_press_event", self._on_right_click)
+        fig, ax = rec.plot(
+            use_model=None,  # default: use model if available
+            ax=self.ax,
+            fig=self.fig,
+            show_residual=self.residual_checkbox.isChecked()
+        )
+        
+        self.fig = fig
+        self.ax = ax 
+        self.fig.canvas.manager.window.setWindowIcon(QIcon(ICON_PATH))
+        plt.show(block=False)
+        
+        # Connect right-click handler
+        if fig is not None:
+            fig.canvas.mpl_connect("button_press_event", self._on_right_click)
 
     def _on_right_click(self, event):
-        # Only respond to right-clicks in the axes
         if event.button == 3 and event.inaxes == self.ax and event.xdata is not None:
             energy = event.xdata
             lines = exspy.utils.eds.get_xray_lines_near_energy(energy, only_lines=['a', 'b'])
@@ -171,7 +227,6 @@ class NavigatorWidget(QtWidgets.QWidget):
             self._show_lines_popup(energy, msg)
 
     def _show_lines_popup(self, energy, msg):
-        # Render each line as a hyperlink
         if msg:
             html = "<br>".join(
                 f'<a href="{line.split("_")[0]}">{line}</a>' for line in msg.splitlines()
@@ -189,98 +244,88 @@ class NavigatorWidget(QtWidgets.QWidget):
             current_elements.append(element)
             self.el_edit.setText(",".join(current_elements))
             self.apply_elements()
+        self.popup.close()
 
-        self.popup.close()  # Close the popup after selection
-
-    def compute_intensities(self):
-        # Estimate background windows and compute intensities
-        if not self.signal.metadata.get_item('Sample.elements', default=[]):
+    def compute_intensities_active(self):
+        rec = self.session.active_record
+        if rec is None or not rec.elements:
             QtWidgets.QMessageBox.warning(self, "No Elements Defined", "Please define elements first before computing intensities.")
             return
-        
-        bw = self.signal.estimate_background_windows()
-        intensities = self.signal.get_lines_intensity(background_windows=bw)
+        rec.compute_intensities()
+        # Always show global table, auto-check if needed
+        if not self.show_summed_table_checkbox.isChecked():
+            self.show_summed_table_checkbox.setChecked(True)
+        else:
+            self.show_summed_intensity_table()
 
-        # Each item in intensities is a signal for one line
-        line_names = [sig.metadata.get_item('Sample.xray_lines')[0] for sig in intensities]
-        num_spectra = intensities[0].data.shape[0] if intensities else 0
+    def compute_intensities_all(self):
+        self.session.compute_all_intensities()
+        # Always show global table, auto-check if needed
+        if not self.show_summed_table_checkbox.isChecked():
+            self.show_summed_table_checkbox.setChecked(True)
+        else:
+            self.show_summed_intensity_table()
 
-        # Prepare table data: one row per spectrum
-        table_data = []
-        for i in range(num_spectra):
-            row = [os.path.basename(self.filenames[i])]
-            for sig in intensities:
-                val = sig.data[i]
-                row.append(val)
-            table_data.append(row)
+    def fit_spectrum_active(self):
+        rec = self.session.active_record
+        if rec is None or not rec.elements:
+            QtWidgets.QMessageBox.warning(self, "No Elements Defined", "Please define elements first before fitting.")
+            return
+        rec.fit_model()
+        # Always show global table, auto-check if needed
+        if not self.show_fitted_table_checkbox.isChecked():
+            self.show_fitted_table_checkbox.setChecked(True)
+        else:
+            self.show_fitted_intensity_table()
+        self.update_plot(force_replot=True)
 
-        # Show results in a popup table
-        self._show_intensity_table(line_names, table_data, title='Summed Line Intensities')
+    def fit_spectrum_all(self):
+        self.session.fit_all_models()
+        if self.show_fitted_table_checkbox.isChecked():
+            self.show_fitted_intensity_table()
 
-    def fit_spectrum(self):
-        # Create and fit model
-        self.model = self.signal.create_model()
-        self.model.fit()
+    def remove_fit_active(self):
+        rec = self.session.active_record
+        if rec is not None:
+            rec.model = None
+            rec.fitted_intensities = None
+            self.update_plot(force_replot=True)
+            # Update the fitted table view if open
+            if self.show_fitted_table_checkbox.isChecked():
+                self.show_fitted_intensity_table()
 
-        # Get fitted line intensities
-        intensities = self.model.get_lines_intensity()
-
-        # Each item in intensities is a signal for one line
-        line_names = [sig.metadata.get_item('Sample.xray_lines')[0] for sig in intensities]
-        num_spectra = intensities[0].data.shape[0] if intensities else 0
-
-        # Prepare table data: one row per spectrum
-        table_data = []
-        for i in range(num_spectra):
-            row = [os.path.basename(self.filenames[i])]
-            for sig in intensities:
-                val = sig.data[i]
-                row.append(val)
-            table_data.append(row)
-
-        # Show results in a popup table
-        self._show_intensity_table(line_names, table_data, title='Fitted Line Intensities')
-
-        # Open model plot
-        self.update_plot(self.list.currentRow(), force_replot=True)
-        # self.model.plot(xray_lines=True, plot_residual=True, navigator=None)
-        # plt.show(block=False)
-        
-    def remove_fit(self):
-        self.model = None
-        self.update_plot(self.list.currentRow(), force_replot=True)
-        if 'Fitted Line Intensities' in self.table_views:
-            self.table_views['Fitted Line Intensities'].close()
+    def remove_fit_all(self):
+        for rec in self.session.records.values():
+            rec.model = None
+            rec.fitted_intensities = None
+        self.update_plot(force_replot=True)
+        for title in list(self.table_views.keys()):
+            if "Fitted Line Intensities" in title:
+                self.table_views[title].close()
+                del self.table_views[title]
 
     def _show_intensity_table(self, line_names, table_data, title="Line Intensities"):
-        # Store geometry if dialog exists
         geom = None
         if title in self.table_views:
             old_dialog = self.table_views[title]
             geom = old_dialog.geometry()
             old_dialog.close()
-
         dialog = self.table_views[title] = QtWidgets.QDialog(self)
         dialog.setWindowTitle(title)
+        dialog.setWindowIcon(QIcon(ICON_PATH))  # Set icon for table
         dialog.setModal(False)
         layout = QtWidgets.QVBoxLayout(dialog)
         table = QtWidgets.QTableWidget(dialog)
         table.setRowCount(len(table_data))
         table.setColumnCount(len(line_names) + 1)
-        
         header = ["Spectrum"] + line_names
         table.setHorizontalHeaderLabels(header)
-
-        # Use fixed-width font for all items
         font = table.font()
         font.setFamily("Courier New")
         font.setPointSize(10)
-
         for i, row in enumerate(table_data):
             for j, val in enumerate(row):
-                # Format as fixed-point with one decimal if possible
                 if j == 0:
-                    # Spectrum name: left-aligned, normal font
                     item = QtWidgets.QTableWidgetItem(str(val))
                     item.setTextAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
                 else:
@@ -292,156 +337,189 @@ class NavigatorWidget(QtWidgets.QWidget):
                     item.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
                     item.setFont(font)
                 table.setItem(i, j, item)
-
         layout.addWidget(table)
         dialog.resize(800, 300)
         if geom is not None:
             dialog.setGeometry(geom)
         dialog.show()
 
+        # Connect finished signal to uncheck the corresponding checkbox
+        def on_dialog_closed(result):
+            if title == "Summed Line Intensities":
+                if self.show_summed_table_checkbox.isChecked():
+                    self.show_summed_table_checkbox.setChecked(False)
+            elif title == "Fitted Line Intensities":
+                if self.show_fitted_table_checkbox.isChecked():
+                    self.show_fitted_table_checkbox.setChecked(False)
+            self.table_views.pop(title, None)
+        dialog.finished.connect(on_dialog_closed)
+
     def toggle_log_y(self):
-        if self.ax is not None:
+        ax = self.ax
+        fig = self.fig
+        if ax is not None:
             scale = "log" if self.log_checkbox.isChecked() else "linear"
-            self.ax.set_yscale(scale)
+            ax.set_yscale(scale)
             if scale == 'log':
-                self.ax.set_ylim(bottom=1)  # Avoid log(0)
-            self.fig.canvas.draw_idle()
+                ax.set_ylim(bottom=1)
+            if fig is not None:
+                fig.canvas.draw_idle()
 
     def toggle_residual(self):
-        self.update_plot(self.list.currentRow(), force_replot=True)
+        self.update_plot(force_replot=True)
 
     def reset_zoom(self):
-        if self.ax is not None:
-            # X axis: full energy range
-            xaxis = self.signal.axes_manager.signal_axes[0]
-            self.ax.set_xlim(xaxis.low_value, xaxis.high_value)
-            # Y axis: auto
-            if self.ax.get_yscale() == 'log':
-                self.ax.autoscale(enable=True, axis='y', tight=True)
-                self.ax.set_ylim(bottom=1)  # Avoid log(0)
+        ax = self.ax
+        fig = self.fig
+        rec = self.session.active_record
+        if ax is not None and rec is not None:
+            xaxis = rec.signal.axes_manager.signal_axes[0]
+            ax.set_xlim(xaxis.low_value, xaxis.high_value)
+            if ax.get_yscale() == 'log':
+                ax.autoscale(enable=True, axis='y', tight=True)
+                ax.set_ylim(bottom=1)
             else:
-                self.ax.autoscale(enable=True, axis='y')
-            self.fig.canvas.draw_idle()
+                ax.autoscale(enable=True, axis='y')
+            if fig is not None:
+                fig.canvas.draw_idle()
 
     def closeEvent(self, event):
-        # Close the plot window if open
-        if self.fig is not None:
-            plt.close(self.fig)
+        fig = self.fig
+        if fig is not None:
+            plt.close(fig)
         event.accept()
 
-    def make_report(self):
-        report = EDSReport(self.signal, self.model, self.filenames)
-        report.export_report(spectrum_idx=self.list.currentRow())
-
-    def make_report_all(self):
-        report = EDSReport(self.signal, self.model, self.filenames)
-        indices = list(range(len(self.filenames)))
-        report.export_report(spectrum_idx=indices)
-
-class EDSReport:
-    def __init__(self, signal, model=None, paths=None):
-        self.signal = signal
-        self.model = model
-        self.paths = paths
-
-    def export_report(self, spectrum_idx: int | list[int] = 0, pdf_path=None):
-        
-        if isinstance(spectrum_idx, list):
-            for idx in spectrum_idx:
-                self.export_report(idx, pdf_path=None)
-            return        
-        
-        # Get line intensities from the full model or signal
-        if self.model is not None:
-            intensities = self.model.get_lines_intensity()
+    def toggle_summed_table(self):
+        if self.show_summed_table_checkbox.isChecked():
+            self.show_summed_intensity_table()
         else:
-            intensities = self.signal.get_lines_intensity()
+            self.close_table("Summed Line Intensities")
 
-        if pdf_path is None:
-            pdf_path = os.path.splitext(self.paths[spectrum_idx])[0] + '.pdf'
-            
-        spectrum_name = os.path.splitext(os.path.basename(self.paths[spectrum_idx]))[0]
-        
-        # Prepare transposed table data: one row per line (no energy)
-        table_data = [["Line", "Intensity"]]
-        for sig in intensities:
-            line = sig.metadata.get_item('Sample.xray_lines')[0]
-            val = sig.data[spectrum_idx]
-            table_data.append([line, f"{val:.1f}"])
+    def toggle_fitted_table(self):
+        if self.show_fitted_table_checkbox.isChecked():
+            self.show_fitted_intensity_table()
+        else:
+            self.close_table("Fitted Line Intensities")
 
-        # Split table into two columns if too long
-        n = len(table_data)
-        split = (n + 1) // 2
-        left_table = table_data[:split]
-        right_table = table_data[0:1] + table_data[split:]  # repeat header for right table
+    def close_table(self, title):
+        dlg = self.table_views.pop(title, None)
+        if dlg is not None:
+            dlg.close()
+        # Do NOT uncheck the checkbox here!
 
-        # Create PDF
-        doc = SimpleDocTemplate(pdf_path, pagesize=A4)
-        elements = []
-        styles = getSampleStyleSheet()
-        elements.append(Paragraph(f"EDS Spectrum and Intensities<br/><b>{spectrum_name}</b>", styles['Title']))
-        elements.append(Spacer(1, 0.2 * inch))
+    def show_summed_intensity_table(self):
+        table_data = []
+        line_names = []
+        for rec in self.session.records.values():
+            if rec.intensities:
+                line_names = [sig.metadata.get_item('Sample.xray_lines')[0] for sig in rec.intensities]
+                break
+        for rec in self.session.records.values():
+            if rec.intensities:
+                row = [rec.name] + [f"{sig.data[0]:.1f}" for sig in rec.intensities]
+                table_data.append(row)
+        self._show_intensity_table(line_names, table_data, title="Summed Line Intensities")
 
-        # Save the current figure as PNG and preserve aspect ratio
-        plot_png = pdf_path.replace('.pdf', '_spectrum.png')
-        plot_pdf = pdf_path.replace('.pdf', '_spectrum.pdf')
-        
-        fig = self.signal._plot.signal_plot.figure if self.signal._plot and self.signal._plot.signal_plot else None
-        
-        if fig is not None:
-            fig.savefig(plot_png, dpi=600)
-            fig.savefig(plot_pdf)
-            fig_width_inch, fig_height_inch = fig.get_size_inches()
-            pdf_img_width = 6.5 * inch
-            pdf_img_height = pdf_img_width * (fig_height_inch / fig_width_inch)
-            elements.append(Image(plot_png, width=pdf_img_width, height=pdf_img_height))
-            elements.append(Spacer(1, 0.2 * inch))
+    def show_fitted_intensity_table(self):
+        table_data = []
+        line_names = []
+        for rec in self.session.records.values():
+            if rec.fitted_intensities:
+                line_names = [sig.metadata.get_item('Sample.xray_lines')[0] for sig in rec.fitted_intensities]
+                break
+        for rec in self.session.records.values():
+            if rec.fitted_intensities:
+                row = [rec.name] + [f"{sig.data[0]:.1f}" for sig in rec.fitted_intensities]
+                table_data.append(row)
+        self._show_intensity_table(line_names, table_data, title="Fitted Line Intensities")
 
-        # Add left and right tables side by side
-        tbl_left = Table(left_table, hAlign='LEFT')
-        tbl_right = Table(right_table, hAlign='LEFT')
-        style = TableStyle([
-            ('FONTNAME', (0,0), (-1,-1), 'Courier'),
-            ('FONTSIZE', (0,0), (-1,-1), 10),
-            ('ALIGN', (1,0), (1,-1), 'RIGHT'),
-            ('ALIGN', (0,0), (0,-1), 'LEFT'),
-            ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
-            ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
-        ])
-        tbl_left.setStyle(style)
-        tbl_right.setStyle(style)
+    def add_file(self):
+        fname, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Add .eds File", "", "EDS Files (*.eds)")
+        if fname:
+            self.session.load([fname])
+            self._refresh_spectrum_list()
+            # Optionally set elements for new spectra
+            self.apply_elements()
+            self.update_plot()
 
-        elements.append(Table([[tbl_left, tbl_right]], colWidths=[3*inch, 3*inch]))
-        elements.append(Spacer(1, 0.2 * inch))
+    def add_directory(self):
+        dname = QtWidgets.QFileDialog.getExistingDirectory(self, "Add Directory")
+        if dname:
+            from glob import glob
+            paths = glob(os.path.join(dname, '**', '*.eds'), recursive=True)
+            if paths:
+                self.session.load(paths)
+                self._refresh_spectrum_list()
+                self.apply_elements()
+                self.update_plot()
 
-        doc.build(elements)
-        print(f"PDF report saved to {pdf_path}")
-        if sys.platform.startswith("win"):
-            os.startfile(pdf_path)
+    def remove_selected_spectrum(self):
+        idx = self.list.currentRow()
+        if idx < 0 or idx >= self.list.count():
+            return
+        name = self.list.item(idx).text()
+        self.session.remove(name)
+        self._refresh_spectrum_list()
+        # Update plot and tables
+        self.update_plot()
+        if self.show_summed_table_checkbox.isChecked():
+            self.show_summed_intensity_table()
+        if self.show_fitted_table_checkbox.isChecked():
+            self.show_fitted_intensity_table()
+
+    def _refresh_spectrum_list(self):
+        self.list.blockSignals(True)
+        self.list.clear()
+        for name in self.session.records:
+            self.list.addItem(name)
+        # Select the new active spectrum if any
+        if self.session.active_name and self.session.active_name in self.session.records:
+            idx = list(self.session.records.keys()).index(self.session.active_name)
+            self.list.setCurrentRow(idx)
+        elif self.list.count() > 0:
+            self.list.setCurrentRow(0)
+        self.list.blockSignals(False)
+
+    def _on_unit_changed(self):
+        if self.unit_counts_radio.isChecked():
+            unit = "counts"
+        elif self.unit_cps_radio.isChecked():
+            unit = "cps"
+        else:
+            return
+        try:
+            self.session.set_unit(unit)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Unit Switch Error", str(e))
+        self.update_plot()
+        # Update tables if open
+        if self.show_summed_table_checkbox.isChecked():
+            self.show_summed_intensity_table()
+        if self.show_fitted_table_checkbox.isChecked():
+            self.show_fitted_intensity_table()
 
 def main():
     from glob import glob
-    
     p = argparse.ArgumentParser(description="EDS Spectrum Viewer")
     p.add_argument("spectra", nargs="*", help="List of spectra files, or directories to search for .eds files")
     p.add_argument("--elements", type=str, help="Comma‑separated element symbols (e.g. Fe,O,Cu)")
     args = p.parse_args()
-    
     paths = []
     for p in args.spectra:
         if os.path.isfile(p):
             paths.append(p)
         else:
-            paths.extend(glob(os.path.join(p,'**','*.eds'), recursive=True))    
+            paths.extend(glob(os.path.join(p,'**','*.eds'), recursive=True))
     
-    specs = hs.load(paths, stack=True) # pyright: ignore[reportCallIssue]
-    specs.metadata['General']['title'] = os.path.basename(os.path.commonpath(paths))
+    if not paths:
+        print("No spectra files provided. Please provide at least one .eds file or directory containing .eds files.")
+        sys.exit(1)
     
+    session = EDSSession(paths)
     if args.elements:
-        specs.add_elements([e.strip() for e in args.elements.split(',') if e.strip()])
-
+        session.set_elements([e.strip() for e in args.elements.split(',') if e.strip()])
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-    nav = NavigatorWidget(specs, paths)
+    nav = NavigatorWidget(session)
     nav.show()
     app.exec_()
 
