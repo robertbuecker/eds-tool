@@ -58,6 +58,32 @@ class NavigatorWidget(QtWidgets.QWidget):
         layout.addWidget(self.list)
         self.list.currentRowChanged.connect(self.on_spectrum_changed)
 
+        # Add unit row
+        unit_row = QtWidgets.QHBoxLayout()
+        self.unit_counts_radio = QtWidgets.QRadioButton("Counts")
+        self.unit_cps_radio = QtWidgets.QRadioButton("CPS")
+        unit_row.addWidget(QtWidgets.QLabel("Signal unit:"))
+        unit_row.addWidget(self.unit_counts_radio)
+        unit_row.addWidget(self.unit_cps_radio)
+        layout.addLayout(unit_row)
+        self.unit_counts_radio.setChecked(True)
+        self.unit_counts_radio.toggled.connect(self._on_signal_type_changed)
+        self.unit_cps_radio.toggled.connect(self._on_signal_type_changed)
+
+        # Add background status label
+        self.bg_file_label = QtWidgets.QLabel("No background loaded")
+        layout.addWidget(self.bg_file_label)
+
+        # Add background row
+        bg_row = QtWidgets.QHBoxLayout()
+        self.bg_checkbox = QtWidgets.QCheckBox("Apply BG correction")
+        self.bg_open_btn = QtWidgets.QPushButton("Open BG")
+        bg_row.addWidget(self.bg_checkbox)
+        bg_row.addWidget(self.bg_open_btn)
+        layout.addLayout(bg_row)
+        self.bg_checkbox.stateChanged.connect(self._on_signal_type_changed)
+        self.bg_open_btn.clicked.connect(self._on_bg_open)
+
         # Row 3: Remove selected
         self.remove_spec_btn = QtWidgets.QPushButton("Remove Selected Spectrum")
         layout.addWidget(self.remove_spec_btn)
@@ -125,19 +151,6 @@ class NavigatorWidget(QtWidgets.QWidget):
         self.show_summed_table_checkbox.stateChanged.connect(self.toggle_summed_table)
         self.show_fitted_table_checkbox.stateChanged.connect(self.toggle_fitted_table)
 
-        # Row 11: Signal unit (Counts/CPS)
-        unit_row = QtWidgets.QHBoxLayout()
-        self.unit_counts_radio = QtWidgets.QRadioButton("Counts")
-        self.unit_cps_radio = QtWidgets.QRadioButton("CPS")
-        unit_row.addWidget(QtWidgets.QLabel("Signal unit:"))
-        unit_row.addWidget(self.unit_counts_radio)
-        unit_row.addWidget(self.unit_cps_radio)
-        layout.addLayout(unit_row)
-
-        self.unit_counts_radio.setChecked(True)  # Default to counts
-        self.unit_counts_radio.toggled.connect(self._on_unit_changed)
-        self.unit_cps_radio.toggled.connect(self._on_unit_changed)
-
         # Set navigator widget geometry
         nav_width = 320
         nav_height = 600
@@ -173,7 +186,7 @@ class NavigatorWidget(QtWidgets.QWidget):
         self.list.setCurrentRow(0)
         
         self.update_plot()
-
+        
     def on_spectrum_changed(self, idx):
         if idx < 0 or idx >= self.list.count():
             return
@@ -183,9 +196,13 @@ class NavigatorWidget(QtWidgets.QWidget):
         self.session.set_active(name)
         self.el_edit.setText(",".join(self.session.active_record.elements))
         # Sync radio buttons
-        quantity = self.session.active_record.signal.metadata.get_item('Signal.quantity', default='X-rays (Counts)')
-        self.unit_counts_radio.setChecked(quantity == 'X-rays (Counts)')
-        self.unit_cps_radio.setChecked(quantity == 'X-rays (CPS)')
+        rec = self.session.active_record
+        if rec is not None:
+            quantity = rec.signal.metadata.get_item('Signal.quantity', default='X-rays (Counts)')
+            self.unit_counts_radio.setChecked("Counts" in quantity)
+            self.unit_cps_radio.setChecked("CPS" in quantity)
+            self.bg_checkbox.setChecked("BG" in quantity)
+            self.bg_checkbox.setEnabled(rec._background is not None)
         self.update_plot()
 
     def apply_elements(self):
@@ -281,8 +298,12 @@ class NavigatorWidget(QtWidgets.QWidget):
 
     def fit_spectrum_all(self):
         self.session.fit_all_models()
-        if self.show_fitted_table_checkbox.isChecked():
+        # Always show global table, auto-check if needed
+        if not self.show_fitted_table_checkbox.isChecked():
+            self.show_fitted_table_checkbox.setChecked(True)
+        else:
             self.show_fitted_intensity_table()
+        self.update_plot(force_replot=True)
 
     def remove_fit_active(self):
         rec = self.session.active_record
@@ -480,23 +501,64 @@ class NavigatorWidget(QtWidgets.QWidget):
             self.list.setCurrentRow(0)
         self.list.blockSignals(False)
 
-    def _on_unit_changed(self):
+    def _on_signal_type_changed(self):
         if self.unit_counts_radio.isChecked():
             unit = "counts"
         elif self.unit_cps_radio.isChecked():
             unit = "cps"
         else:
             return
+        # Determine BG correction state (only if BG is loaded)
+        bg_loaded = any(rec._background is not None for rec in self.session.records.values())
+        bg_active = self.bg_checkbox.isChecked() if bg_loaded else False
+
+        # Actually set the signal type and BG correction
         try:
-            self.session.set_unit(unit)
+            self.session.set_unit_and_bg(unit, bg_active)
         except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Unit Switch Error", str(e))
+            QtWidgets.QMessageBox.warning(self, "Signal Type Error", str(e))
+
+        # Update plot and tables
+        self.update_plot()
+        if self.show_summed_table_checkbox.isChecked():
+            self.show_summed_intensity_table()
+        if self.show_fitted_table_checkbox.isChecked():
+            self.show_fitted_intensity_table()
+
+        # Disable BG correction checkbox if no BG loaded
+        self.bg_checkbox.setEnabled(bg_loaded)
+        if not bg_loaded:
+            self.bg_checkbox.setChecked(False)
+
+    def _on_bg_correction_changed(self):
+        active = self.bg_checkbox.isChecked()
+        self.session.set_bg_correction(active)
         self.update_plot()
         # Update tables if open
         if self.show_summed_table_checkbox.isChecked():
             self.show_summed_intensity_table()
         if self.show_fitted_table_checkbox.isChecked():
             self.show_fitted_intensity_table()
+
+    def _on_bg_open(self):
+        # Start in the folder of the active spectrum
+        start_dir = ""
+        rec = self.session.active_record
+        if rec is not None and hasattr(rec, "path"):
+            start_dir = os.path.dirname(rec.path)
+        fname, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Open Background Spectrum", start_dir, "EDS Files (*.eds)"
+        )
+        if fname:
+            try:
+                self.session.set_background(fname)
+                self.bg_file_label.setText(f"Background file: {os.path.basename(fname)}")
+                QtWidgets.QMessageBox.information(self, "Background Loaded", f"Background spectrum loaded:\n{fname}")
+                self.bg_checkbox.setEnabled(True)
+                self.bg_checkbox.setChecked(True)
+                self._on_signal_type_changed()  # Ensure everything is updated
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(self, "Background Error", str(e))
 
 def main():
     from glob import glob

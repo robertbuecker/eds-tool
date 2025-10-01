@@ -9,9 +9,12 @@ from matplotlib.figure import Figure
 class EDSSpectrumRecord:
     def __init__(self, path: str):
         self.path = path
-        self.signal = hs.load(path)
-        self.signal.metadata.set_item('General.title', os.path.splitext(os.path.basename(path))[0])
-        self.signal.metadata.set_item('General.original_filename', path)
+        self._signal = hs.load(path)
+        self._signal.metadata.set_item('General.title', os.path.splitext(os.path.basename(path))[0])
+        self._signal.metadata.set_item('General.original_filename', path)
+        self._background: Optional[exspy.signals.EDSTEMSpectrum] = None
+        self._bg_correction_active = False
+        self.signal = self._signal  # This will be updated by set_bg_correction
         self.model: Optional[exspy.models.EDSTEMModel] = None
         self.intensities: Optional[List[hs.BaseSignal]] = None
         self.fitted_intensities: Optional[List[hs.BaseSignal]] = None
@@ -105,39 +108,89 @@ class EDSSpectrumRecord:
     def get_metadata(self) -> Dict:
         return self.signal.metadata.as_dictionary()
 
-    def get_live_time(self) -> Optional[float]:
+    def get_live_time(self, signal=None) -> Optional[float]:
         """Get measurement live time from metadata, or None if missing."""
+        sig = signal if signal is not None else self._signal
         try:
-            return float(self.signal.metadata.get_item('Acquisition_instrument.TEM.Detector.EDS.live_time'))
+            return float(sig.metadata.get_item('Acquisition_instrument.TEM.Detector.EDS.live_time'))
         except Exception:
             return None
 
-    def set_unit(self, unit: str):
+    def set_background(self, bg_signal: exspy.signals.EDSTEMSpectrum):
+        """Set the background signal for subtraction. Always keep in counts."""
+        self._background = bg_signal
+        # If BG correction is active, recompute signal
+        current_quantity = self.signal.metadata.get_item('Signal.quantity', default='X-rays (Counts)')
+        bg_active = "BG" in current_quantity
+        unit = "cps" if "CPS" in current_quantity else "counts"
+        self.set_unit_and_bg(unit, bg_active)
+
+    def set_unit_and_bg(self, unit: str, bg_correct: bool):
         """
-        Set signal unit to 'counts' or 'cps'. Invalidate fit and intensities only if changed.
+        Set signal unit to 'counts' or 'cps', and apply/remove background correction.
+        Stores both in Signal.quantity (e.g. 'X-rays (Counts, BG)').
         """
         if unit not in ('counts', 'cps'):
             raise ValueError("unit must be 'counts' or 'cps'")
         current_quantity = self.signal.metadata.get_item('Signal.quantity', default='X-rays (Counts)')
-        live_time = self.get_live_time()
-        if unit == 'cps':
-            if current_quantity == 'X-rays (CPS)':
-                return  # Already normalized, do nothing
-            if live_time is None or live_time == 0:
-                raise ValueError(f"Live time missing or zero for spectrum '{self.name}'")
-            self.signal.data = self.signal.data / live_time
-            self.signal.metadata.set_item('Signal.quantity', 'X-rays (CPS)')
-        elif unit == 'counts':
-            if current_quantity == 'X-rays (Counts)':
-                return  # Already raw counts, do nothing
-            if live_time is None or live_time == 0:
-                raise ValueError(f"Live time missing or zero for spectrum '{self.name}'")
-            self.signal.data = self.signal.data * live_time
-            self.signal.metadata.set_item('Signal.quantity', 'X-rays (Counts)')
-        # Invalidate fit and intensities only if changed
+        already_cps = "CPS" in current_quantity
+        already_counts = "Counts" in current_quantity
+        already_bg = "BG" in current_quantity
+
+        # Only recompute if something changes
+        if ((unit == "cps" and already_cps) or (unit == "counts" and already_counts)) and (bg_correct == already_bg):
+            return
+
+        # Always start from raw signal
+        sig = self._signal
+        live_time_sig = self.get_live_time(sig)
+        if live_time_sig is None or live_time_sig == 0:
+            raise ValueError(f"Live time missing or zero for spectrum '{self.name}'")
+
+        # Prepare background subtraction if needed
+        if bg_correct and self._background is not None:
+            bg = self._background
+            live_time_bg = self.get_live_time(bg)
+            if live_time_bg is None or live_time_bg == 0:
+                raise ValueError(f"Live time missing or zero for background spectrum")
+            # Always keep background in counts
+            bg_data = bg.data
+            # Scale background appropriately
+            if unit == "counts":
+                scale = live_time_sig / live_time_bg
+                sig_data = sig.data - bg_data * scale
+            else:  # CPS
+                sig_data = (sig.data / live_time_sig) - (bg_data / live_time_bg)
+            self.signal = sig.deepcopy()
+            self.signal.data = sig_data
+        else:
+            # No BG correction
+            if unit == "counts":
+                self.signal = sig.deepcopy()
+                self.signal.data = sig.data
+            else:  # CPS
+                self.signal = sig.deepcopy()
+                self.signal.data = sig.data / live_time_sig
+
+        # Set quantity string
+        quantity = f"X-rays ({unit.capitalize()}{', BG' if bg_correct and self._background is not None else ''})"
+        self.signal.metadata.set_item('Signal.quantity', quantity)
+        self._bg_correction_active = bg_correct and self._background is not None
+
+        # Invalidate fit and intensities
         self.intensities = None
         self.model = None
         self.fitted_intensities = None
+
+    def set_unit(self, unit: str):
+        """Legacy: just call set_unit_and_bg with current BG state."""
+        self.set_unit_and_bg(unit, self._bg_correction_active)
+
+    def set_bg_correction(self, active: bool):
+        """Legacy: just call set_unit_and_bg with current unit."""
+        current_quantity = self.signal.metadata.get_item('Signal.quantity', default='X-rays (Counts)')
+        unit = "cps" if "CPS" in current_quantity else "counts"
+        self.set_unit_and_bg(unit, active)
 
 class EDSSession:
     def __init__(self, paths: Optional[List[str]] = None):
@@ -149,17 +202,29 @@ class EDSSession:
     def load(self, paths: List[str]):
         # Optionally copy elements from the first existing record
         existing_elements = None
+        bg_signal = None
+        unit = "counts"
+        bg_active = False
+        bg_file = None
         if self.records:
             first_rec = next(iter(self.records.values()))
             existing_elements = first_rec.elements if first_rec.elements else None
+            bg_signal = first_rec._background
+            unit = "cps" if "CPS" in first_rec.signal.metadata.get_item('Signal.quantity', default='X-rays (Counts)') else "counts"
+            bg_active = first_rec._bg_correction_active
+            bg_file = getattr(first_rec, "bg_file", None)
 
         for rec in [EDSSpectrumRecord(p) for p in paths]:
             if rec.name in self.records:
                 print(f"Warning: Spectrum '{rec.name}' already loaded, skipping.")
                 continue
-            # Copy elements if available
             if existing_elements:
                 rec.set_elements(existing_elements)
+            if bg_signal is not None:
+                rec.set_background(bg_signal)
+            rec.set_unit_and_bg(unit, bg_active)
+            if bg_file:
+                rec.bg_file = bg_file
             self.records[rec.name] = rec
         if self.records and self.active_name is None:
             self.active_name = next(iter(self.records))
@@ -225,3 +290,17 @@ class EDSSession:
         """Set unit for all spectra ('counts' or 'cps')."""
         for rec in self.records.values():
             rec.set_unit(unit)
+
+    def set_bg_correction(self, active: bool):
+        """Enable/disable background subtraction for all records."""
+        for rec in self.records.values():
+            rec.set_bg_correction(active)
+
+    def set_unit_and_bg(self, unit: str, bg_correct: bool):
+        for rec in self.records.values():
+            rec.set_unit_and_bg(unit, bg_correct)
+
+    def set_background(self, bg_path: str):
+        bg_signal = hs.load(bg_path)
+        for rec in self.records.values():
+            rec.set_background(bg_signal)
