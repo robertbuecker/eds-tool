@@ -10,6 +10,7 @@ from eds_session import EDSSession
 from qtpy.QtGui import QIcon
 
 ICON_PATH = os.path.join(os.path.dirname(__file__), "eds_icon.png")
+print(f"Icon path: {ICON_PATH}")
 
 class NavigatorWidget(QtWidgets.QWidget):
     def __init__(self, session: EDSSession):
@@ -42,7 +43,7 @@ class NavigatorWidget(QtWidgets.QWidget):
 
         # Row 1a: Elements entry
         el_layout = QtWidgets.QHBoxLayout()
-        self.el_edit = QtWidgets.QLineEdit(",".join(self.session.active_record.elements))
+        self.el_edit = QtWidgets.QLineEdit(",".join(self.session.active_record.elements if self.session.active_record else []))
         el_apply = QtWidgets.QPushButton("Apply elements")
         el_layout.addWidget(QtWidgets.QLabel("Elements:"))
         el_layout.addWidget(self.el_edit)
@@ -573,9 +574,9 @@ def main():
         else:
             paths.extend(glob(os.path.join(p,'**','*.eds'), recursive=True))
     
-    if not paths:
-        print("No spectra files provided. Please provide at least one .eds file or directory containing .eds files.")
-        sys.exit(1)
+    # if not paths:
+    #     print("No spectra files provided. Please provide at least one .eds file or directory containing .eds files.")
+    #     sys.exit(1)
     
     session = EDSSession(paths)
     if args.elements:

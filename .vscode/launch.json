@@ -44,6 +44,15 @@
                 "--elements","Fe,Cu,Au,Cr,C,N,O,Al,Ga"
             ],
             "console": "integratedTerminal"
-        }        
+        },
+        {
+            "name": "EDS tool (no files)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "eds_tool.py",
+            "args": [
+            ],
+            "console": "integratedTerminal"
+        }             
     ]
 }

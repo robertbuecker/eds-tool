@@ -1,3 +1,6 @@
 eds_tool_legacy.py
 play_*.ipynb
 *.hspy
+build
+dist
+__pycache__
