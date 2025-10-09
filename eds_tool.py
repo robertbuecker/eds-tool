@@ -8,6 +8,7 @@ import os
 import argparse
 from eds_session import EDSSession
 from qtpy.QtGui import QIcon
+from intensity_table_dialog import IntensityTableDialog
 
 ICON_PATH = os.path.join(os.path.dirname(__file__), "eds_icon.png")
 print(f"Icon path: {ICON_PATH}")
@@ -85,10 +86,15 @@ class NavigatorWidget(QtWidgets.QWidget):
         self.bg_checkbox.stateChanged.connect(self._on_signal_type_changed)
         self.bg_open_btn.clicked.connect(self._on_bg_open)
 
-        # Row 3: Remove selected
+        # Row 3: Remove selected | Remove all
+        remove_row = QtWidgets.QHBoxLayout()
         self.remove_spec_btn = QtWidgets.QPushButton("Remove Selected Spectrum")
-        layout.addWidget(self.remove_spec_btn)
+        self.remove_all_btn = QtWidgets.QPushButton("Remove all")
+        remove_row.addWidget(self.remove_spec_btn)
+        remove_row.addWidget(self.remove_all_btn)
+        layout.addLayout(remove_row)
         self.remove_spec_btn.clicked.connect(self.remove_selected_spectrum)
+        self.remove_all_btn.clicked.connect(self.remove_all_spectra)
 
         # Row 4: Intensities (sel) | Intensities (all)
         int_row = QtWidgets.QHBoxLayout()
@@ -207,8 +213,10 @@ class NavigatorWidget(QtWidgets.QWidget):
         self.update_plot()
 
     def apply_elements(self):
+        # Always update elements, even if empty
         els = [e.strip() for e in self.el_edit.text().split(",") if e.strip()]
         self.session.set_elements(els)
+        # session.set_elements should handle clearing elements for all records
         self.update_plot()
         # Update tables (they will be empty after element change)
         if self.show_summed_table_checkbox.isChecked():
@@ -332,40 +340,10 @@ class NavigatorWidget(QtWidgets.QWidget):
             old_dialog = self.table_views[title]
             geom = old_dialog.geometry()
             old_dialog.close()
-        dialog = self.table_views[title] = QtWidgets.QDialog(self)
-        dialog.setWindowTitle(title)
-        dialog.setWindowIcon(QIcon(ICON_PATH))  # Set icon for table
-        dialog.setModal(False)
-        layout = QtWidgets.QVBoxLayout(dialog)
-        table = QtWidgets.QTableWidget(dialog)
-        table.setRowCount(len(table_data))
-        table.setColumnCount(len(line_names) + 1)
-        header = ["Spectrum"] + line_names
-        table.setHorizontalHeaderLabels(header)
-        font = table.font()
-        font.setFamily("Courier New")
-        font.setPointSize(10)
-        for i, row in enumerate(table_data):
-            for j, val in enumerate(row):
-                if j == 0:
-                    item = QtWidgets.QTableWidgetItem(str(val))
-                    item.setTextAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-                else:
-                    try:
-                        sval = f"{float(val):.1f}"
-                    except Exception:
-                        sval = str(val)
-                    item = QtWidgets.QTableWidgetItem(sval)
-                    item.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-                    item.setFont(font)
-                table.setItem(i, j, item)
-        layout.addWidget(table)
-        dialog.resize(800, 300)
+        dialog = self.table_views[title] = IntensityTableDialog(self, line_names, table_data, title=title)
         if geom is not None:
             dialog.setGeometry(geom)
         dialog.show()
-
-        # Connect finished signal to uncheck the corresponding checkbox
         def on_dialog_closed(result):
             if title == "Summed Line Intensities":
                 if self.show_summed_table_checkbox.isChecked():
@@ -488,6 +466,19 @@ class NavigatorWidget(QtWidgets.QWidget):
             self.show_summed_intensity_table()
         if self.show_fitted_table_checkbox.isChecked():
             self.show_fitted_intensity_table()
+            
+    def remove_all_spectra(self):
+        # Remove all spectra from the session
+        for name in list(self.session.records.keys()):
+            self.session.remove(name)
+        self.session.active_name = None
+        self._refresh_spectrum_list()
+        self.update_plot()
+        # Update tables if open
+        if self.show_summed_table_checkbox.isChecked():
+            self.show_summed_intensity_table()
+        if self.show_fitted_table_checkbox.isChecked():
+            self.show_fitted_intensity_table()            
 
     def _refresh_spectrum_list(self):
         self.list.blockSignals(True)

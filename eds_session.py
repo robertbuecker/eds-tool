@@ -28,9 +28,6 @@ class EDSSpectrumRecord:
         return self.signal.metadata.get_item('Sample.elements', default=[])
 
     def set_elements(self, elements: List[str]):
-        if not elements:
-            print(f"Warning: No elements provided for {self.name}")
-            return
         if elements != self.elements:
             self.signal.set_elements(elements)
             self.intensities = None
@@ -275,7 +272,8 @@ class EDSSession:
     def plot_active(self, use_model: Optional[bool] = None, ax: Optional[Any] = None, fig: Optional[Any] = None, **kwargs):
         rec = self.active_record
         if rec is not None:
-            rec.plot(use_model=use_model, ax=ax, fig=fig, **kwargs)
+            return rec.plot(use_model=use_model, ax=ax, fig=fig, **kwargs)
+        return None, None
 
     def remove(self, name: str):
         if name in self.records:
@@ -299,8 +297,11 @@ class EDSSession:
     def set_unit_and_bg(self, unit: str, bg_correct: bool):
         for rec in self.records.values():
             rec.set_unit_and_bg(unit, bg_correct)
-
     def set_background(self, bg_path: str):
         bg_signal = hs.load(bg_path)
+        if not isinstance(bg_signal, exspy.signals.EDSTEMSpectrum):
+            print(f"Error: The loaded background is not an EDSTEMSpectrum (got {type(bg_signal)}).")
+            return
         for rec in self.records.values():
+            rec.set_background(bg_signal)
             rec.set_background(bg_signal)
