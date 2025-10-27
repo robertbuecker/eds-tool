@@ -26,6 +26,26 @@ class EDSSpectrumRecord:
     @property
     def elements(self) -> List[str]:
         return self.signal.metadata.get_item('Sample.elements', default=[])
+    
+    def export(self, folder: Optional[str] = None, formats: list | str | tuple = ('csv', 'mas')):
+        if isinstance(formats, str):
+            formats = [formats]
+            
+        folder = folder if folder is not None else os.path.dirname(self.path)
+        os.makedirs(folder, exist_ok=True)
+            
+        for fmt in formats:
+            if fmt.lower() == 'csv':
+                import pandas as pd
+                energy = self.signal.axes_manager['Energy'].axis.round(6)
+                signal = self.signal.data
+                spec_data = pd.DataFrame(signal, index=energy, columns=[self.signal.metadata.get_item('Signal.quantity')])
+                spec_data.index.name = 'Energy'
+                spec_data.to_csv(os.path.join(folder, f"{self.name}.csv"))
+            else:
+                target = os.path.join(folder, f"{self.name}.{fmt}")                
+                if os.path.exists(target): os.remove(target)
+                self.signal.save(target)
 
     def set_elements(self, elements: List[str]):
         if elements != self.elements:
@@ -225,6 +245,10 @@ class EDSSession:
             self.records[rec.name] = rec
         if self.records and self.active_name is None:
             self.active_name = next(iter(self.records))
+            
+    def export_all(self, folder: Optional[str] = None, formats: list | str | tuple = ('csv', 'mas')):
+        for rec in self.records.values():
+            rec.export(folder=folder, formats=formats)
 
     def set_elements(self, elements: List[str]):
         for rec in self.records.values():

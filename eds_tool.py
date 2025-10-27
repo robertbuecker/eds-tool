@@ -11,7 +11,7 @@ from qtpy.QtGui import QIcon
 from intensity_table_dialog import IntensityTableDialog
 
 ICON_PATH = os.path.join(os.path.dirname(__file__), "eds_icon.png")
-print(f"Icon path: {ICON_PATH}")
+# print(f"Icon path: {ICON_PATH}")
 
 class NavigatorWidget(QtWidgets.QWidget):
     def __init__(self, session: EDSSession):
@@ -86,6 +86,7 @@ class NavigatorWidget(QtWidgets.QWidget):
         self.bg_checkbox.stateChanged.connect(self._on_signal_type_changed)
         self.bg_open_btn.clicked.connect(self._on_bg_open)
 
+
         # Row 3: Remove selected | Remove all
         remove_row = QtWidgets.QHBoxLayout()
         self.remove_spec_btn = QtWidgets.QPushButton("Remove Selected Spectrum")
@@ -95,6 +96,25 @@ class NavigatorWidget(QtWidgets.QWidget):
         layout.addLayout(remove_row)
         self.remove_spec_btn.clicked.connect(self.remove_selected_spectrum)
         self.remove_all_btn.clicked.connect(self.remove_all_spectra)
+
+        # Row 3a: Export Selected | Export All
+        export_row = QtWidgets.QHBoxLayout()
+        self.export_selected_btn = QtWidgets.QPushButton("Export Selected")
+        self.export_all_btn = QtWidgets.QPushButton("Export All")
+        export_row.addWidget(self.export_selected_btn)
+        export_row.addWidget(self.export_all_btn)
+        layout.addLayout(export_row)
+        self.export_selected_btn.clicked.connect(self.export_selected_spectrum)
+        self.export_all_btn.clicked.connect(self.export_all_spectra)
+
+        # Row 3b: Ask for folder (checkbox) and Format (entry)
+        export_opts_row = QtWidgets.QHBoxLayout()
+        self.ask_folder_checkbox = QtWidgets.QCheckBox("Ask for folder")
+        self.format_entry = QtWidgets.QLineEdit("emsa, csv")
+        export_opts_row.addWidget(self.ask_folder_checkbox)
+        export_opts_row.addWidget(QtWidgets.QLabel("Format:"))
+        export_opts_row.addWidget(self.format_entry)
+        layout.addLayout(export_opts_row)
 
         # Row 4: Intensities (sel) | Intensities (all)
         int_row = QtWidgets.QHBoxLayout()
@@ -479,6 +499,50 @@ class NavigatorWidget(QtWidgets.QWidget):
             self.show_summed_intensity_table()
         if self.show_fitted_table_checkbox.isChecked():
             self.show_fitted_intensity_table()            
+
+    # --- Export helper and handler methods (moved out of __init__) ---
+    def _get_export_folder_and_formats(self):
+        folder = None
+        if self.ask_folder_checkbox.isChecked():
+            folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Export Folder")
+            if not folder:
+                return None, None  # User cancelled
+        # Parse formats from entry (split by comma or space)
+        fmt_text = self.format_entry.text().strip()
+        if not fmt_text:
+            formats = ["emsa", "csv"]
+        else:
+            # Split by comma or whitespace
+            import re
+            formats = [f.strip() for f in re.split(r'[\s,]+', fmt_text) if f.strip()]
+        return folder, formats
+
+    def export_selected_spectrum(self):
+        rec = self.session.active_record
+        if rec is None:
+            QtWidgets.QMessageBox.warning(self, "No Spectrum Selected", "Please select a spectrum to export.")
+            return
+        folder, formats = self._get_export_folder_and_formats()
+        if formats is None:
+            return  # Cancelled
+        try:
+            rec.export(folder=folder, formats=formats)
+            QtWidgets.QMessageBox.information(self, "Export Complete", f"Exported '{rec.name}' to {folder or os.path.dirname(rec.path)} in formats: {', '.join(formats)}")
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Export Error", str(e))
+
+    def export_all_spectra(self):
+        if not self.session.records:
+            QtWidgets.QMessageBox.warning(self, "No Spectra", "No spectra loaded to export.")
+            return
+        folder, formats = self._get_export_folder_and_formats()
+        if formats is None:
+            return  # Cancelled
+        try:
+            self.session.export_all(folder=folder, formats=formats)
+            QtWidgets.QMessageBox.information(self, "Export Complete", f"Exported all spectra to {folder or 'default folders'} in formats: {', '.join(formats)}")
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Export Error", str(e))
 
     def _refresh_spectrum_list(self):
         self.list.blockSignals(True)
