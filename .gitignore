@@ -1,6 +1,9 @@
 eds_tool_legacy.py
 play_*.ipynb
 *.hspy
+check_deps.*
+test_*.py
+*_SUMMARY.md
 build
 dist
 __pycache__

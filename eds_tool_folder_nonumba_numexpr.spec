@@ -60,7 +60,6 @@ exe = EXE(
     pyz,
     a.scripts,
     [],
-    exclude_binaries=True,  # Don't create standalone exe, only folder distribution
     name='eds_tool',
     debug=False,
     bootloader_ignore_signals=False,
@@ -84,5 +83,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='eds_tool'
+    name='eds_tool_nonumba_numexpr'
 )
