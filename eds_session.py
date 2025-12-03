@@ -47,6 +47,64 @@ class EDSSpectrumRecord:
                 if os.path.exists(target): os.remove(target)
                 self.signal.save(target)
 
+    def export_intensities_csv(self, folder: Optional[str] = None):
+        """Export computed intensities to a CSV file in the same folder as the spectrum."""
+        if not self.intensities:
+            return
+        
+        import pandas as pd
+        
+        folder = folder if folder is not None else os.path.dirname(self.path)
+        os.makedirs(folder, exist_ok=True)
+        
+        # Build a single-row table with line names as columns
+        data = {}
+        for sig in self.intensities:
+            line = sig.metadata.get_item('Sample.xray_lines')[0]
+            val = sig.data[0] if hasattr(sig.data, "__getitem__") else sig.data
+            data[line] = [float(val)]
+        
+        df = pd.DataFrame(data, index=[self.name])
+        df.index.name = 'spectrum'
+        
+        # Save with naming convention: {spectrum_name}_summed_intensities.csv
+        filepath = os.path.join(folder, f"{self.name}_summed_intensities.csv")
+        df.to_csv(filepath)
+
+    def export_plot(self, folder: Optional[str] = None, formats: list | str | tuple = ('png',), max_energy: Optional[float] = None):
+        """Export plot of the spectrum to image files in various formats."""
+        if isinstance(formats, str):
+            formats = [formats]
+            
+        folder = folder if folder is not None else os.path.dirname(self.path)
+        os.makedirs(folder, exist_ok=True)
+        
+        # Use hyperspy's plot method to get proper X-ray line annotations
+        import matplotlib.pyplot as plt
+        
+        # Plot using hyperspy's built-in method which adds X-ray lines
+        if self.elements:
+            self.signal.plot(xray_lines=True, navigator=None)
+        else:
+            self.signal.plot(xray_lines=False, navigator=None)
+        
+        # Get the figure that was just created
+        fig = self.signal._plot.signal_plot.figure
+        ax = self.signal._plot.signal_plot.ax
+        
+        # Set x-axis range if max_energy is specified
+        if max_energy is not None:
+            energy = self.signal.axes_manager['Energy'].axis
+            ax.set_xlim(left=energy[0], right=max_energy)
+        
+        # Save in all requested formats
+        for fmt in formats:
+            target = os.path.join(folder, f"{self.name}.{fmt}")
+            fig.savefig(target, dpi=150, bbox_inches='tight')
+        
+        # Close the plot
+        plt.close(fig)
+
     def set_elements(self, elements: List[str]):
         if elements != self.elements:
             self.signal.set_elements(elements)
@@ -249,6 +307,27 @@ class EDSSession:
     def export_all(self, folder: Optional[str] = None, formats: list | str | tuple = ('csv', 'mas')):
         for rec in self.records.values():
             rec.export(folder=folder, formats=formats)
+
+    def export_intensity_table(self, folder: str, fitted=False):
+        """Export intensity table to CSV file."""
+        import pandas as pd
+        
+        # Get intensity data
+        table_data = self.get_intensity_table(fitted=fitted)
+        if not table_data:
+            print("Warning: No intensity data to export.")
+            return
+        
+        # Convert to DataFrame and pivot for better readability
+        df = pd.DataFrame(table_data)
+        pivot = df.pivot(index='spectrum', columns='line', values='intensity')
+        
+        # Save to CSV
+        os.makedirs(folder, exist_ok=True)
+        filename = "fitted_intensities.csv" if fitted else "summed_intensities.csv"
+        filepath = os.path.join(folder, filename)
+        pivot.to_csv(filepath)
+        print(f"Intensity table exported to: {filepath}")
 
     def set_elements(self, elements: List[str]):
         for rec in self.records.values():

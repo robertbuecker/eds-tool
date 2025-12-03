@@ -1,19 +1,119 @@
 import sys
-from qtpy import QtWidgets, QtCore
+import warnings
+from typing import Optional, List
+
+# Suppress numba-related warnings from hyperspy/rsciio when numba is excluded
+warnings.filterwarnings('ignore', message='.*numba.*')
+warnings.filterwarnings('ignore', message='.*Numba.*')
+warnings.filterwarnings('ignore', category=UserWarning, module='hyperspy')
+warnings.filterwarnings('ignore', category=UserWarning, module='rsciio')
+
 import matplotlib
-matplotlib.use('QtAgg')
-import matplotlib.pyplot as plt
-import exspy
 import os
 import argparse
 from eds_session import EDSSession
-from qtpy.QtGui import QIcon
-from intensity_table_dialog import IntensityTableDialog
+
+# GUI imports - only used when not in auto mode, but needed for class definition
+try:
+    from qtpy import QtWidgets, QtCore
+    from qtpy.QtGui import QIcon
+    from intensity_table_dialog import IntensityTableDialog
+    import matplotlib.pyplot as plt
+    import exspy
+    GUI_AVAILABLE = True
+except ImportError:
+    GUI_AVAILABLE = False
 
 ICON_PATH = os.path.join(os.path.dirname(__file__), "eds_icon.png")
 # print(f"Icon path: {ICON_PATH}")
 
-class NavigatorWidget(QtWidgets.QWidget):
+# Configuration for auto workflow exports
+AUTO_SPECTRUM_FORMATS = ['emsa', 'csv']  # Formats for spectrum export
+AUTO_PLOT_FORMATS = ['png', 'svg', 'jpg']  # Formats for plot export (BMP not supported by matplotlib)
+
+def auto_workflow(session: EDSSession, max_energy: Optional[float] = None, use_cps: bool = False):
+    """
+    Automatic workflow for EDS analysis without GUI.
+    
+    Steps:
+    1. Set units (counts or CPS)
+    2. Compute intensities for all spectra (using summing, not fitting)
+    3. Export spectra in configured formats (EMSA, CSV by default)
+    4. Export plots in configured formats (PNG, SVG, JPG by default)
+    5. Export intensity table to the longest common folder
+    """
+    import exspy
+    
+    print("Running automatic EDS workflow...")
+    
+    # Set units
+    unit = "cps" if use_cps else "counts"
+    print(f"Using units: {unit.upper()}")
+    session.set_unit_and_bg(unit, False)
+    
+    if not session.records:
+        print("Error: No spectra loaded. Please provide spectrum files or directories.")
+        return
+    
+    # Step 1: Compute intensities for all spectra
+    print(f"\n1. Computing intensities for {len(session.records)} spectra...")
+    session.compute_all_intensities()
+    
+    # Check if any intensities were computed
+    computed_count = sum(1 for rec in session.records.values() if rec.intensities is not None)
+    print(f"   Intensities computed for {computed_count}/{len(session.records)} spectra.")
+    
+    # Step 2: Export spectra
+    print(f"\n2. Exporting spectra in formats: {', '.join(AUTO_SPECTRUM_FORMATS)}...")
+    for rec in session.records.values():
+        try:
+            rec.export(formats=AUTO_SPECTRUM_FORMATS)
+            print(f"   Exported: {rec.name}")
+        except Exception as e:
+            print(f"   Error exporting {rec.name}: {e}")
+    
+    # Step 3: Export plots
+    print(f"\n3. Exporting plots in formats: {', '.join(AUTO_PLOT_FORMATS)}...")
+    for rec in session.records.values():
+        try:
+            rec.export_plot(formats=AUTO_PLOT_FORMATS, max_energy=max_energy)
+            print(f"   Plotted: {rec.name}")
+        except Exception as e:
+            print(f"   Error plotting {rec.name}: {e}")
+    
+    # Step 4: Export individual intensity CSVs
+    print("\n4. Exporting individual intensity files...")
+    for rec in session.records.values():
+        if rec.intensities:
+            try:
+                rec.export_intensities_csv()
+                print(f"   Exported intensities: {rec.name}")
+            except Exception as e:
+                print(f"   Error exporting intensities for {rec.name}: {e}")
+    
+    # Step 5: Export intensity table to longest common folder
+    print("\n5. Exporting combined intensity table...")
+    if len(session.records) > 1:
+        try:
+            common_folder = os.path.commonpath([rec.path for rec in session.records.values()])
+        except ValueError:
+            # No common path (e.g., different drives on Windows)
+            common_folder = None
+    else:
+        # Single file - use its directory
+        common_folder = os.path.dirname(list(session.records.values())[0].path)
+    
+    if common_folder:
+        try:
+            session.export_intensity_table(common_folder, fitted=False)
+        except Exception as e:
+            print(f"   Error exporting intensity table: {e}")
+    else:
+        print("   Warning: Could not determine common folder for intensity table.")
+    
+    print("\nAutomatic workflow completed!")
+
+class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
     def __init__(self, session: EDSSession):
         super().__init__()
         self.session = session
@@ -621,6 +721,9 @@ def main():
     p = argparse.ArgumentParser(description="EDS Spectrum Viewer")
     p.add_argument("spectra", nargs="*", help="List of spectra files, or directories to search for .eds files")
     p.add_argument("--elements", type=str, help="Comma‑separated element symbols (e.g. Fe,O,Cu)")
+    p.add_argument("--auto", action="store_true", help="Run automatic workflow without GUI: load spectra, compute intensities, export spectra/plots/table")
+    p.add_argument("--max-energy", type=float, default=None, help="Maximum energy (keV) for plot range in auto mode")
+    p.add_argument("--cps", action="store_true", help="Use counts per second (CPS) units instead of counts")
     args = p.parse_args()
     paths = []
     for p in args.spectra:
@@ -636,10 +739,20 @@ def main():
     session = EDSSession(paths)
     if args.elements:
         session.set_elements([e.strip() for e in args.elements.split(',') if e.strip()])
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-    nav = NavigatorWidget(session)
-    nav.show()
-    app.exec_()
+    
+    if args.auto:
+        # Run automatic workflow without GUI
+        auto_workflow(session, max_energy=args.max_energy, use_cps=args.cps)
+    else:
+        # Start GUI
+        if not GUI_AVAILABLE:
+            print("Error: GUI modules not available. Install qtpy and related packages.")
+            sys.exit(1)
+        matplotlib.use('QtAgg')
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+        nav = NavigatorWidget(session)
+        nav.show()
+        app.exec_()
 
 if __name__ == "__main__":
     main()
