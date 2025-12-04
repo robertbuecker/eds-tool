@@ -81,29 +81,39 @@ class EDSSpectrumRecord:
         
         # Use hyperspy's plot method to get proper X-ray line annotations
         import matplotlib.pyplot as plt
+        import sys
+        import io
         
-        # Plot using hyperspy's built-in method which adds X-ray lines
-        if self.elements:
-            self.signal.plot(xray_lines=True, navigator=None)
-        else:
-            self.signal.plot(xray_lines=False, navigator=None)
+        # Suppress stderr to hide matplotlib blit warnings for non-interactive backends
+        stderr_backup = sys.stderr
+        sys.stderr = io.StringIO()
         
-        # Get the figure that was just created
-        fig = self.signal._plot.signal_plot.figure
-        ax = self.signal._plot.signal_plot.ax
-        
-        # Set x-axis range if max_energy is specified
-        if max_energy is not None:
-            energy = self.signal.axes_manager['Energy'].axis
-            ax.set_xlim(left=energy[0], right=max_energy)
-        
-        # Save in all requested formats
-        for fmt in formats:
-            target = os.path.join(folder, f"{self.name}.{fmt}")
-            fig.savefig(target, dpi=150, bbox_inches='tight')
-        
-        # Close the plot
-        plt.close(fig)
+        try:
+            # Plot using hyperspy's built-in method which adds X-ray lines
+            if self.elements:
+                self.signal.plot(xray_lines=True, navigator=None)
+            else:
+                self.signal.plot(xray_lines=False, navigator=None)
+            
+            # Get the figure that was just created
+            fig = self.signal._plot.signal_plot.figure
+            ax = self.signal._plot.signal_plot.ax
+            
+            # Set x-axis range if max_energy is specified
+            if max_energy is not None:
+                energy = self.signal.axes_manager['Energy'].axis
+                ax.set_xlim(left=energy[0], right=max_energy)
+            
+            # Save in all requested formats
+            for fmt in formats:
+                target = os.path.join(folder, f"{self.name}.{fmt}")
+                fig.savefig(target, dpi=150, bbox_inches='tight')
+            
+            # Close the plot
+            plt.close(fig)
+        finally:
+            # Restore stderr
+            sys.stderr = stderr_backup
 
     def set_elements(self, elements: List[str]):
         if elements != self.elements:

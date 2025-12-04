@@ -1,12 +1,17 @@
 import sys
 import warnings
+import logging
+import os
 from typing import Optional, List
+import io
 
-# Suppress numba-related warnings from hyperspy/rsciio when numba is excluded
-warnings.filterwarnings('ignore', message='.*numba.*')
-warnings.filterwarnings('ignore', message='.*Numba.*')
-warnings.filterwarnings('ignore', category=UserWarning, module='hyperspy')
-warnings.filterwarnings('ignore', category=UserWarning, module='rsciio')
+# Suppress all warnings and logging
+warnings.filterwarnings('ignore')
+logging.disable(logging.WARNING)
+
+# Redirect stderr during imports to suppress hyperspy/rsciio numba warnings
+_stderr_backup = sys.stderr
+sys.stderr = io.StringIO()
 
 import matplotlib
 import os
@@ -23,6 +28,9 @@ try:
     GUI_AVAILABLE = True
 except ImportError:
     GUI_AVAILABLE = False
+
+# Restore stderr after imports
+sys.stderr = _stderr_backup
 
 ICON_PATH = os.path.join(os.path.dirname(__file__), "eds_icon.png")
 # print(f"Icon path: {ICON_PATH}")
@@ -42,7 +50,11 @@ def auto_workflow(session: EDSSession, max_energy: Optional[float] = None, use_c
     4. Export plots in configured formats (PNG, SVG, JPG by default)
     5. Export intensity table to the longest common folder
     """
+    # Suppress stderr during exspy import to hide numba warnings
+    _stderr_backup = sys.stderr
+    sys.stderr = io.StringIO()
     import exspy
+    sys.stderr = _stderr_backup
     
     print("Running automatic EDS workflow...")
     

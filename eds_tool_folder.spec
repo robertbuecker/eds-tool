@@ -41,9 +41,17 @@ a = Analysis(
     datas=[
         ('C:\\Users\\robert.buecker\\.conda\\envs\\eds-tools\\Lib\\site-packages\\hyperspy\\hyperspy_extension.yaml', 'hyperspy'),
     ]  + extra_datas ,
-    hiddenimports=[] + extra_hiddenimports,
+    hiddenimports=[
+        'matplotlib.backends.backend_svg',
+        'matplotlib.backends.backend_agg',
+        'matplotlib.backends.backend_pdf',
+    ] + extra_hiddenimports,
     hookspath=[],
-    hooksconfig={},
+    hooksconfig={
+        'matplotlib': {
+            'backends': ['Agg', 'QtAgg', 'TkAgg', 'SVG', 'PDF'],
+        },
+    },
     runtime_hooks=[],
     excludes=[
         # Large optional dependencies not needed for EDS analysis
