@@ -164,6 +164,14 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         layout.addLayout(el_layout)
         el_apply.clicked.connect(self.apply_elements)
         layout.addWidget(QtWidgets.QLabel("Right-click spectrum to add elements"))
+        
+        # Row 1b: BG Elements entry
+        bg_el_layout = QtWidgets.QHBoxLayout()
+        self.bg_el_edit = QtWidgets.QLineEdit(",".join(self.session.active_record.bg_elements if self.session.active_record else []))
+        bg_el_layout.addWidget(QtWidgets.QLabel("BG Elements:"))
+        bg_el_layout.addWidget(self.bg_el_edit)
+        layout.addLayout(bg_el_layout)
+        self.bg_el_edit.textChanged.connect(self.apply_bg_elements)
 
         # Row 2: SPECTRUM LIST
         self.list = QtWidgets.QListWidget()
@@ -188,15 +196,17 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self.bg_file_label = QtWidgets.QLabel("No background loaded")
         layout.addWidget(self.bg_file_label)
 
-        # Add background row
+        # Add background row (now with Open BG button and correction mode combo)
         bg_row = QtWidgets.QHBoxLayout()
-        self.bg_checkbox = QtWidgets.QCheckBox("Apply BG correction")
         self.bg_open_btn = QtWidgets.QPushButton("Open BG")
-        bg_row.addWidget(self.bg_checkbox)
         bg_row.addWidget(self.bg_open_btn)
+        bg_row.addWidget(QtWidgets.QLabel("BG correction:"))
+        self.bg_correction_combo = QtWidgets.QComboBox()
+        self.bg_correction_combo.addItems(["No BG correction", "Subtract fitted BG", "Subtract spectra"])
+        bg_row.addWidget(self.bg_correction_combo)
         layout.addLayout(bg_row)
-        self.bg_checkbox.stateChanged.connect(self._on_signal_type_changed)
         self.bg_open_btn.clicked.connect(self._on_bg_open)
+        self.bg_correction_combo.currentIndexChanged.connect(self._on_bg_correction_mode_changed)
 
 
         # Row 3: Remove selected | Remove all
@@ -247,6 +257,16 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         layout.addLayout(fit_row)
         self.fit_btn.clicked.connect(self.fit_spectrum_active)
         self.fit_all_btn.clicked.connect(self.fit_spectrum_all)
+        
+        # Row 5a: Fit background mode
+        fit_bg_row = QtWidgets.QHBoxLayout()
+        fit_bg_row.addWidget(QtWidgets.QLabel("Fit background:"))
+        self.fit_bg_combo = QtWidgets.QComboBox()
+        self.fit_bg_combo.addItems(["BG Elements", "BG Spec (recommended)"])
+        self.fit_bg_combo.setCurrentIndex(1)  # Default to BG Spec
+        fit_bg_row.addWidget(self.fit_bg_combo)
+        layout.addLayout(fit_bg_row)
+        self.fit_bg_combo.currentIndexChanged.connect(self._on_fit_bg_mode_changed)
 
         # Row 6: Delete Fit (sel) | Delete Fit (all)
         del_row = QtWidgets.QHBoxLayout()
@@ -274,11 +294,22 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self.reset_zoom_btn.clicked.connect(self.reset_zoom)
         self.log_checkbox.stateChanged.connect(self.toggle_log_y)
 
-        # Row 9: Show fit residual (centered)
+        # Row 9: Show fit residual | Show background
+        plot_options_row = QtWidgets.QHBoxLayout()
         self.residual_checkbox = QtWidgets.QCheckBox("Show fit residual")
-        layout.addWidget(self.residual_checkbox)
         self.residual_checkbox.setChecked(True)
         self.residual_checkbox.stateChanged.connect(self.toggle_residual)
+        self.background_checkbox = QtWidgets.QCheckBox("Show background")
+        self.background_checkbox.setChecked(False)
+        self.background_checkbox.stateChanged.connect(self.toggle_background)
+        plot_options_row.addWidget(self.residual_checkbox)
+        plot_options_row.addWidget(self.background_checkbox)
+        layout.addLayout(plot_options_row)
+        
+        # Row 9a: Chi-square display
+        self.chisq_label = QtWidgets.QLabel("χ²ᵣ: -")
+        self.chisq_label.setStyleSheet("QLabel { color: #666; font-style: italic; }")
+        layout.addWidget(self.chisq_label)
 
         # Row 10: Intensities (sum) | Intensities (fit)
         table_row = QtWidgets.QHBoxLayout()
@@ -324,24 +355,75 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         # Set current row after all widgets are created
         self.list.setCurrentRow(0)
         
+        # Sync UI state with any command-line loaded background
+        rec = self.session.active_record
+        if rec is not None:
+            # Fit BG mode combo
+            if rec.bg_fit_mode == 'bg_elements':
+                self.fit_bg_combo.setCurrentIndex(0)
+            else:  # bg_spec
+                self.fit_bg_combo.setCurrentIndex(1)
+            
+            # Enable/disable BG elements entry based on fit mode
+            self.bg_el_edit.setEnabled(rec.bg_fit_mode == 'bg_elements')
+            
+            # Update BG status label
+            if rec._background is not None:
+                # Try to get background filename if available
+                if hasattr(rec._background, 'metadata') and hasattr(rec._background.metadata, 'General') and hasattr(rec._background.metadata.General, 'original_filename'):
+                    bg_name = rec._background.metadata.General.original_filename
+                    self.bg_file_label.setText(f"Background file: {os.path.basename(bg_name)}")
+                else:
+                    self.bg_file_label.setText("Background loaded")
+            else:
+                self.bg_file_label.setText("No background loaded")
+        
         self.update_plot()
         
     def on_spectrum_changed(self, idx):
+        """Handle spectrum selection changes in the list."""
         if idx < 0 or idx >= self.list.count():
             return
         name = self.list.item(idx).text()
         if self.session.active_name == name:
             return  # No change, skip recomputation
         self.session.set_active(name)
+        
+        # Update elements fields
         self.el_edit.setText(",".join(self.session.active_record.elements))
-        # Sync radio buttons
+        self.bg_el_edit.setText(",".join(self.session.active_record.bg_elements))
+        
+        # Sync UI controls with record state
         rec = self.session.active_record
         if rec is not None:
+            # Unit radio buttons
             quantity = rec.signal.metadata.get_item('Signal.quantity', default='X-rays (Counts)')
-            self.unit_counts_radio.setChecked("Counts" in quantity)
+            self.unit_counts_radio.setChecked("Counts" in quantity and "CPS" not in quantity)
             self.unit_cps_radio.setChecked("CPS" in quantity)
-            self.bg_checkbox.setChecked("BG" in quantity)
-            self.bg_checkbox.setEnabled(rec._background is not None)
+            
+            # BG correction combo
+            if ", BG Fitted" in quantity:
+                self.bg_correction_combo.setCurrentIndex(1)  # Subtract fitted BG
+            elif ", BG" in quantity:
+                self.bg_correction_combo.setCurrentIndex(2)  # Subtract spectra
+            else:
+                self.bg_correction_combo.setCurrentIndex(0)  # No BG correction
+            
+            # Fit BG mode combo
+            if rec.bg_fit_mode == 'bg_elements':
+                self.fit_bg_combo.setCurrentIndex(0)
+            else:  # bg_spec
+                self.fit_bg_combo.setCurrentIndex(1)
+            
+            # Enable/disable BG elements entry based on fit mode
+            self.bg_el_edit.setEnabled(rec.bg_fit_mode == 'bg_elements')
+            
+            # Update BG status label
+            if rec._background is not None:
+                self.bg_file_label.setText("Background loaded")
+            else:
+                self.bg_file_label.setText("No background loaded")
+        
         self.update_plot()
 
     def apply_elements(self):
@@ -365,10 +447,18 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             use_model=None,  # default: use model if available
             ax=self.ax,
             fig=self.fig,
-            show_residual=self.residual_checkbox.isChecked()
+            show_residual=self.residual_checkbox.isChecked(),
+            show_background=self.background_checkbox.isChecked()
         )
         
         self.fig = fig
+        self.ax = ax
+        
+        # Update chi-square label
+        if rec.reduced_chisq is not None:
+            self.chisq_label.setText(f"χ²ᵣ: {rec.reduced_chisq:.4f}")
+        else:
+            self.chisq_label.setText("χ²ᵣ: -")
         self.ax = ax 
         self.fig.canvas.manager.window.setWindowIcon(QIcon(ICON_PATH))
         plt.show(block=False)
@@ -498,6 +588,9 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
                 fig.canvas.draw_idle()
 
     def toggle_residual(self):
+        self.update_plot(force_replot=True)
+    
+    def toggle_background(self):
         self.update_plot(force_replot=True)
 
     def reset_zoom(self):
@@ -670,19 +763,18 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self.list.blockSignals(False)
 
     def _on_signal_type_changed(self):
+        """Handle changes to signal unit (counts/CPS)."""
         if self.unit_counts_radio.isChecked():
             unit = "counts"
         elif self.unit_cps_radio.isChecked():
             unit = "cps"
         else:
             return
-        # Determine BG correction state (only if BG is loaded)
-        bg_loaded = any(rec._background is not None for rec in self.session.records.values())
-        bg_active = self.bg_checkbox.isChecked() if bg_loaded else False
-
-        # Actually set the signal type and BG correction
+        
+        # Apply unit change while preserving bg_correction_mode
         try:
-            self.session.set_unit_and_bg(unit, bg_active)
+            for rec in self.session.records.values():
+                rec._apply_unit_and_bg_correction(unit)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Signal Type Error", str(e))
 
@@ -692,23 +784,77 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             self.show_summed_intensity_table()
         if self.show_fitted_table_checkbox.isChecked():
             self.show_fitted_intensity_table()
-
-        # Disable BG correction checkbox if no BG loaded
-        self.bg_checkbox.setEnabled(bg_loaded)
-        if not bg_loaded:
-            self.bg_checkbox.setChecked(False)
-
-    def _on_bg_correction_changed(self):
-        active = self.bg_checkbox.isChecked()
-        self.session.set_bg_correction(active)
+    
+    def _on_bg_correction_mode_changed(self):
+        """Handle changes to background correction mode combo box."""
+        mode_map = {
+            0: 'none',  # "No BG correction"
+            1: 'subtract_fitted',  # "Subtract fitted BG"
+            2: 'subtract_spectra'  # "Subtract spectra"
+        }
+        mode = mode_map.get(self.bg_correction_combo.currentIndex(), 'none')
+        
+        try:
+            self.session.set_bg_correction_mode(mode)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "BG Correction Error", str(e))
+        
+        # Update plot and tables
         self.update_plot()
-        # Update tables if open
         if self.show_summed_table_checkbox.isChecked():
             self.show_summed_intensity_table()
         if self.show_fitted_table_checkbox.isChecked():
             self.show_fitted_intensity_table()
+    
+    def _on_fit_bg_mode_changed(self):
+        """Handle changes to fit background mode combo box."""
+        mode_map = {
+            0: 'bg_elements',  # "BG Elements"
+            1: 'bg_spec'  # "BG Spec (recommended)"
+        }
+        mode = mode_map.get(self.fit_bg_combo.currentIndex(), 'bg_spec')
+        
+        # If switching to bg_spec without BG loaded, prompt to load one
+        if mode == 'bg_spec':
+            if not self.session.records:
+                return
+            first_rec = next(iter(self.session.records.values()))
+            if first_rec._background is None:
+                QtWidgets.QMessageBox.information(
+                    self, "Background Required",
+                    "BG Spec mode requires a background spectrum. Please load one using 'Open BG'."
+                )
+                self._on_bg_open()
+                # Check again if BG was loaded
+                if first_rec._background is None:
+                    # User cancelled, revert to bg_elements
+                    self.fit_bg_combo.blockSignals(True)
+                    self.fit_bg_combo.setCurrentIndex(0)
+                    self.fit_bg_combo.blockSignals(False)
+                    mode = 'bg_elements'
+        
+        try:
+            self.session.set_bg_fit_mode(mode)
+            # Update BG elements field enable state
+            self.bg_el_edit.setEnabled(mode == 'bg_elements')
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Fit BG Mode Error", str(e))
+    
+    def apply_bg_elements(self):
+        """Handle changes to BG elements entry field."""
+        text = self.bg_el_edit.text().strip()
+        if not text:
+            elements = []
+        else:
+            elements = [e.strip() for e in text.split(',') if e.strip()]
+        
+        try:
+            self.session.set_bg_elements(elements)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "BG Elements Error", str(e))
 
     def _on_bg_open(self):
+        """Open and load a background spectrum file."""
         # Start in the folder of the active spectrum
         start_dir = ""
         rec = self.session.active_record
@@ -721,10 +867,18 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             try:
                 self.session.set_background(fname)
                 self.bg_file_label.setText(f"Background file: {os.path.basename(fname)}")
-                QtWidgets.QMessageBox.information(self, "Background Loaded", f"Background spectrum loaded:\n{fname}")
-                self.bg_checkbox.setEnabled(True)
-                self.bg_checkbox.setChecked(True)
-                self._on_signal_type_changed()  # Ensure everything is updated
+                
+                # Automatically select "BG Spec (recommended)" mode when BG is loaded
+                self.fit_bg_combo.blockSignals(True)
+                self.fit_bg_combo.setCurrentIndex(1)  # BG Spec
+                self.fit_bg_combo.blockSignals(False)
+                self.session.set_bg_fit_mode('bg_spec')
+                self.bg_el_edit.setEnabled(False)  # Disable BG elements entry
+                
+                QtWidgets.QMessageBox.information(
+                    self, "Background Loaded",
+                    f"Background spectrum loaded and fit mode set to 'BG Spec':\n{fname}"
+                )
             except Exception as e:
                 QtWidgets.QMessageBox.warning(self, "Background Error", str(e))
 
@@ -733,6 +887,8 @@ def main():
     p = argparse.ArgumentParser(description="EDS Spectrum Viewer")
     p.add_argument("spectra", nargs="*", help="List of spectra files, or directories to search for .eds files")
     p.add_argument("--elements", type=str, help="Comma‑separated element symbols (e.g. Fe,O,Cu)")
+    p.add_argument("--bg-elements", type=str, help="Comma-separated background element symbols (e.g. Cu,Au,Cr)")
+    p.add_argument("--bg-spectrum", type=str, help="Path to background spectrum file (.eds)")
     p.add_argument("--auto", action="store_true", help="Run automatic workflow without GUI: load spectra, compute intensities, export spectra/plots/table")
     p.add_argument("--max-energy", type=float, default=None, help="Maximum energy (keV) for plot range in auto mode")
     p.add_argument("--cps", action="store_true", help="Use counts per second (CPS) units instead of counts")
@@ -751,7 +907,12 @@ def main():
     session = EDSSession(paths)
     if args.elements:
         session.set_elements([e.strip() for e in args.elements.split(',') if e.strip()])
-    
+    if args.bg_elements:
+        session.set_bg_elements([e.strip() for e in args.bg_elements.split(',')])
+
+    if args.bg_spectrum:
+        session.set_background(args.bg_spectrum)
+        
     if args.auto:
         # Run automatic workflow without GUI
         auto_workflow(session, max_energy=args.max_energy, use_cps=args.cps)
