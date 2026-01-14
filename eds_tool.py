@@ -519,6 +519,25 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         if rec is None or not rec.elements:
             QtWidgets.QMessageBox.warning(self, "No Elements Defined", "Please define elements first before fitting.")
             return
+        
+        # Check if BG Spec mode is selected but no background is loaded
+        if rec.bg_fit_mode == 'bg_spec' and rec._background is None:
+            reply = QtWidgets.QMessageBox.question(
+                self, 
+                "No Background Loaded",
+                "BG Spec mode requires a background spectrum, but none is loaded.\n\n"
+                "Would you like to load a background spectrum now?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.Yes
+            )
+            if reply == QtWidgets.QMessageBox.Yes:
+                self._on_bg_open()
+                # Check if background was actually loaded
+                if rec._background is None:
+                    return  # User cancelled, abort fit
+            else:
+                return  # User declined, abort fit
+        
         rec.fit_model()
         # Always show global table, auto-check if needed
         if not self.show_fitted_table_checkbox.isChecked():
@@ -528,6 +547,27 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self.update_plot(force_replot=True)
 
     def fit_spectrum_all(self):
+        # Check if any spectrum has BG Spec mode but no background loaded
+        needs_bg = any(rec.bg_fit_mode == 'bg_spec' and rec._background is None 
+                       for rec in self.session.records.values())
+        
+        if needs_bg:
+            reply = QtWidgets.QMessageBox.question(
+                self, 
+                "No Background Loaded",
+                "One or more spectra are set to BG Spec mode, but no background is loaded.\n\n"
+                "Would you like to load a background spectrum now?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.Yes
+            )
+            if reply == QtWidgets.QMessageBox.Yes:
+                self._on_bg_open()
+                # Check if background was actually loaded
+                if self.session.active_record._background is None:
+                    return  # User cancelled, abort fit
+            else:
+                return  # User declined, abort fit
+        
         self.session.fit_all_models()
         # Always show global table, auto-check if needed
         if not self.show_fitted_table_checkbox.isChecked():

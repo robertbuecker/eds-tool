@@ -24,13 +24,27 @@
             "console": "integratedTerminal"
         },
         {
-            "name": "EDS tool (single)",
+            "name": "EDS tool (single without bg)",
             "type": "debugpy",
             "request": "launch",
             "program": "eds_tool.py",
             "args": [
-                "C:\\XcaliburData\\EDS-test\\AlFeGa-acac-1\\exp_7990.EDS",
-                "--elements","Fe,Cu,Au,Cr,C,N,O,Al,Ga"
+                "grain1_thin.eds",
+                "--elements","Na,S,K,Si,Cu,C,O,Cl",
+                "--bg-elements", "Cu,Au,Cr,Sn,Fe,Si,C,Nb,Mo"   
+            ],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "EDS tool (single with bg)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "eds_tool.py",
+            "args": [
+                "grain1_thin.eds",
+                "--elements","Na,S,K,Si,Cu,C,O,Cl",
+                "--bg-elements", "Cu,Au,Cr,Sn,Fe,Si,C,Nb,Mo",
+                "--bg-spectrum", "bg_near_grain1_thin.eds"
             ],
             "console": "integratedTerminal"
         },
