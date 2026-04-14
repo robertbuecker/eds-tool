@@ -15,6 +15,10 @@ class EDSSpectrumRecord:
         self._signal = hs.load(path)
         self._signal.metadata.set_item('General.title', os.path.splitext(os.path.basename(path))[0])
         self._signal.metadata.set_item('General.original_filename', path)
+        
+        # Set default energy resolution to 128 eV (instead of HyperSpy's default of 133 eV)
+        self._signal.set_microscope_parameters(energy_resolution_MnKa=128)
+        
         self._background: Optional[exspy.signals.EDSTEMSpectrum] = None
         self._bg_correction_active = False
         self.signal = self._signal  # This will be updated by set_bg_correction
@@ -228,6 +232,102 @@ class EDSSpectrumRecord:
             self.signal_clean = None
             self.signal_bg = None
             self.reduced_chisq = None
+    
+    def fine_tune_model(self):
+        """
+        Fine-tune the fitted model using energy axis calibration.
+        Calibrates energy offset and resolution to improve fit quality.
+        Uses parameter locking to speed up resolution calibration.
+        """
+        if self.model is None:
+            raise ValueError(f"No fitted model to fine-tune for {self.name}")
+        
+        try:
+            # Get initial values
+            initial_chisq = float(self.model.red_chisq.data.item() if hasattr(self.model.red_chisq.data, 'item') else self.model.red_chisq.data)
+            initial_offset = self.signal.axes_manager[-1].offset
+            initial_resolution = self.signal.metadata.Acquisition_instrument.TEM.Detector.EDS.energy_resolution_MnKa
+            
+            print(f"\n=== Fine-tuning {self.name} ===")
+            print(f"Initial χ²ᵣ: {initial_chisq:.2f}")
+            print(f"Initial offset: {initial_offset:.6f} keV")
+            print(f"Initial resolution: {initial_resolution:.2f} eV")
+            
+            # Step 1: Calibrate energy offset
+            # This includes internal fitting with all parameters free
+            self.model.calibrate_energy_axis(calibrate='offset')
+            offset_1 = self.signal.axes_manager[-1].offset
+            chisq_1 = float(self.model.red_chisq.data.item() if hasattr(self.model.red_chisq.data, 'item') else self.model.red_chisq.data)
+            print(f"\nAfter offset calibration:")
+            print(f"  Offset: {offset_1:.6f} keV (Δ = {(offset_1 - initial_offset)*1000:.2f} eV)")
+            print(f"  χ²ᵣ: {chisq_1:.2f} (Δ = {chisq_1 - initial_chisq:.2f}, {((chisq_1/initial_chisq - 1)*100):.1f}%)")
+            
+            # Step 2: Calibrate energy resolution with locked parameters for speed
+            try:
+                # Lock all element amplitude and background parameters
+                # Only resolution parameter should vary during this calibration
+                locked_params = []
+                for component in self.model:
+                    for param in component.parameters:
+                        if param.free:
+                            param.free = False
+                            locked_params.append(param)
+                
+                # Now do resolution calibration (will unlock resolution parameter internally)
+                self.model.calibrate_energy_axis(calibrate='resolution')
+                
+                # Unlock the parameters we locked
+                for param in locked_params:
+                    param.free = True
+                
+                resolution_2 = self.signal.metadata.Acquisition_instrument.TEM.Detector.EDS.energy_resolution_MnKa
+                chisq_2 = float(self.model.red_chisq.data.item() if hasattr(self.model.red_chisq.data, 'item') else self.model.red_chisq.data)
+                print(f"\nAfter resolution calibration (with locked parameters):")
+                print(f"  Resolution: {resolution_2:.2f} eV (Δ = {resolution_2 - initial_resolution:.2f} eV)")
+                print(f"  χ²ᵣ: {chisq_2:.2f} (Δ = {chisq_2 - chisq_1:.2f}, {((chisq_2/chisq_1 - 1)*100):.1f}%)")
+            except Exception as e:
+                # Make sure to unlock parameters if there's an error
+                for param in locked_params:
+                    param.free = True
+                print(f"\nNote: Resolution calibration failed: {e}")
+                chisq_2 = chisq_1
+                resolution_2 = initial_resolution
+            
+            # Step 3: Final refinement fit with all parameters free
+            self.model.fit()
+            final_chisq = float(self.model.red_chisq.data.item() if hasattr(self.model.red_chisq.data, 'item') else self.model.red_chisq.data)
+            if abs(final_chisq - chisq_2) > 0.01:
+                print(f"\nAfter final refinement fit:")
+                print(f"  χ²ᵣ: {final_chisq:.2f} (Δ = {final_chisq - chisq_2:.2f}, {((final_chisq/chisq_2 - 1)*100):.1f}%)")
+            
+            # Summary
+            final_resolution = self.signal.metadata.Acquisition_instrument.TEM.Detector.EDS.energy_resolution_MnKa
+            final_offset = self.signal.axes_manager[-1].offset
+            total_offset_change = (final_offset - initial_offset) * 1000  # in eV
+            total_resolution_change = final_resolution - initial_resolution
+            total_chisq_change = final_chisq - initial_chisq
+            total_chisq_improvement = ((1 - final_chisq/initial_chisq) * 100)
+            
+            print(f"\n--- Summary ---")
+            print(f"Total offset change: {total_offset_change:+.2f} eV")
+            print(f"Total resolution change: {total_resolution_change:+.2f} eV")
+            print(f"χ²ᵣ: {initial_chisq:.2f} → {final_chisq:.2f} ({total_chisq_improvement:+.1f}%)")
+            
+            # Update fitted intensities
+            self.fitted_intensities = self.model.get_lines_intensity()
+            
+            # Update reduced chi-square
+            if hasattr(self.model, 'red_chisq'):
+                chisq_data = self.model.red_chisq.data
+                self.reduced_chisq = float(chisq_data) if hasattr(chisq_data, '__float__') else float(chisq_data.item())
+            else:
+                self.reduced_chisq = None
+            
+            # Re-compute fitted signals
+            self._compute_fitted_signals()
+            
+        except Exception as e:
+            raise RuntimeError(f"Could not fine-tune model for {self.name}: {e}")
     
     def _compute_fitted_signals(self):
         """
@@ -623,6 +723,13 @@ class EDSSession:
     def set_elements(self, elements: List[str]):
         for rec in self.records.values():
             rec.set_elements(elements)
+    
+    def set_energy_resolution(self, resolution_ev: float):
+        """Set the energy resolution (FWHM at Mn Ka) for all spectra in eV."""
+        for rec in self.records.values():
+            rec.signal.set_microscope_parameters(
+                energy_resolution_MnKa=resolution_ev
+            )
 
     def compute_all_intensities(self):
         for rec in self.records.values():
@@ -631,6 +738,12 @@ class EDSSession:
     def fit_all_models(self):
         for rec in self.records.values():
             rec.fit_model()
+    
+    def fine_tune_all_models(self):
+        """Fine-tune all fitted models in the session."""
+        for rec in self.records.values():
+            if rec.model is not None:
+                rec.fine_tune_model()
 
     def get_intensity_table(self, fitted=False) -> List[Dict]:
         table = []
@@ -725,5 +838,9 @@ class EDSSession:
         if not isinstance(bg_signal, exspy.signals.EDSTEMSpectrum):
             print(f"Error: The loaded background is not an EDSTEMSpectrum (got {type(bg_signal)}).")
             return
+        
+        # Set default energy resolution to 128 eV for background spectrum too
+        bg_signal.set_microscope_parameters(energy_resolution_MnKa=128)
+        
         for rec in self.records.values():
             rec.set_background(bg_signal)

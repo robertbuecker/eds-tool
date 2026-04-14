@@ -268,7 +268,17 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         layout.addLayout(fit_bg_row)
         self.fit_bg_combo.currentIndexChanged.connect(self._on_fit_bg_mode_changed)
 
-        # Row 6: Delete Fit (sel) | Delete Fit (all)
+        # Row 6: Fine-tune (sel) | Fine-tune (all)
+        finetune_row = QtWidgets.QHBoxLayout()
+        self.finetune_btn = QtWidgets.QPushButton("Fine-tune (sel)")
+        self.finetune_all_btn = QtWidgets.QPushButton("Fine-tune (all)")
+        finetune_row.addWidget(self.finetune_btn)
+        finetune_row.addWidget(self.finetune_all_btn)
+        layout.addLayout(finetune_row)
+        self.finetune_btn.clicked.connect(self.fine_tune_active)
+        self.finetune_all_btn.clicked.connect(self.fine_tune_all)
+        
+        # Row 7: Delete Fit (sel) | Delete Fit (all)
         del_row = QtWidgets.QHBoxLayout()
         self.remove_fit_btn = QtWidgets.QPushButton("Delete Fit (sel)")
         self.remove_all_fit_btn = QtWidgets.QPushButton("Delete Fit (all)")
@@ -278,7 +288,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self.remove_fit_btn.clicked.connect(self.remove_fit_active)
         self.remove_all_fit_btn.clicked.connect(self.remove_fit_all)
 
-        # Row 7: Horizontal separator
+        # Row 8: Horizontal separator
         sep = QtWidgets.QFrame()
         sep.setFrameShape(QtWidgets.QFrame.HLine)
         sep.setFrameShadow(QtWidgets.QFrame.Sunken)
@@ -595,6 +605,45 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             if "Fitted Line Intensities" in title:
                 self.table_views[title].close()
                 del self.table_views[title]
+    
+    def fine_tune_active(self):
+        """Fine-tune the fitted model for the active spectrum."""
+        rec = self.session.active_record
+        if rec is None:
+            return
+        if rec.model is None:
+            QtWidgets.QMessageBox.warning(
+                self, "No Fitted Model", 
+                "Please fit a model first before fine-tuning."
+            )
+            return
+        
+        rec.fine_tune_model()
+        
+        # Update fitted intensity table if visible
+        if self.show_fitted_table_checkbox.isChecked():
+            self.show_fitted_intensity_table()
+        
+        self.update_plot(force_replot=True)
+    
+    def fine_tune_all(self):
+        """Fine-tune all fitted models in the session."""
+        # Check if any models exist
+        has_models = any(rec.model is not None for rec in self.session.records.values())
+        if not has_models:
+            QtWidgets.QMessageBox.warning(
+                self, "No Fitted Models", 
+                "Please fit models first before fine-tuning."
+            )
+            return
+        
+        self.session.fine_tune_all_models()
+        
+        # Update fitted intensity table if visible
+        if self.show_fitted_table_checkbox.isChecked():
+            self.show_fitted_intensity_table()
+        
+        self.update_plot(force_replot=True)
 
     def _show_intensity_table(self, line_names, table_data, title="Line Intensities"):
         geom = None
@@ -929,6 +978,7 @@ def main():
     p.add_argument("--elements", type=str, help="Comma‑separated element symbols (e.g. Fe,O,Cu)")
     p.add_argument("--bg-elements", type=str, help="Comma-separated background element symbols (e.g. Cu,Au,Cr)")
     p.add_argument("--bg-spectrum", type=str, help="Path to background spectrum file (.eds)")
+    p.add_argument("--energy-resolution", type=float, default=128, help="Energy resolution FWHM at Mn Ka in eV (default: 128)")
     p.add_argument("--auto", action="store_true", help="Run automatic workflow without GUI: load spectra, compute intensities, export spectra/plots/table")
     p.add_argument("--max-energy", type=float, default=None, help="Maximum energy (keV) for plot range in auto mode")
     p.add_argument("--cps", action="store_true", help="Use counts per second (CPS) units instead of counts")
@@ -939,12 +989,17 @@ def main():
             paths.append(p)
         else:
             paths.extend(glob(os.path.join(p,'**','*.eds'), recursive=True))
+            print(f"Found {len(paths)} .eds files in directory: {p}")
     
     # if not paths:
     #     print("No spectra files provided. Please provide at least one .eds file or directory containing .eds files.")
     #     sys.exit(1)
     
     session = EDSSession(paths)
+    
+    # Set energy resolution (default 128 eV)
+    session.set_energy_resolution(args.energy_resolution)
+    
     if args.elements:
         session.set_elements([e.strip() for e in args.elements.split(',') if e.strip()])
     if args.bg_elements:

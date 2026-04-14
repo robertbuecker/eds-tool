@@ -7,3 +7,7 @@ test_*.py
 build
 dist
 __pycache__
+.tmp
+.numba_cache
+.tmp
+.numba_cache
