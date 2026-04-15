@@ -1,0 +1,11 @@
+# Packages intentionally shipped outside the fixed Xcalibur Python tree.
+# Install these with the Xcalibur interpreter into runtime\site-packages.
+#
+# Keep this list focused on packages missing from C:\Xcalibur\Python312.
+# Do not add packages already provided there unless you intentionally want
+# the overlay copy to override the base installation.
+
+hyperspy
+exspy
+qtpy
+PySide6

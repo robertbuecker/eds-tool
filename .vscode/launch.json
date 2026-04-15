@@ -49,13 +49,27 @@
             "console": "integratedTerminal"
         },
         {
+            "name": "EDS tool (multi with bg)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "eds_tool.py",
+            "args": [
+                "acac\\*.eds",
+                "--elements","C",
+                "--bg-elements", "Cu,Au,Cr,Sn,Fe,Si,C,Nb,Mo",
+                "--bg-spectrum", "acac\\near_7994.EDS"
+            ],
+            "console": "integratedTerminal"
+        },        
+        {
             "name": "EDS tool (whole series)",
             "type": "debugpy",
             "request": "launch",
             "program": "eds_tool.py",
             "args": [
-                "C:\\XcaliburData\\EDS-test\\AlFeGa-acac-1",
-                "--elements","Fe,Cu,Au,Cr,C,N,O,Al,Ga"
+                "acac",
+                "--elements","Fe,Cu,Au,Cr,C,N,O,Al,Ga",
+                "--bg-spectrum", "C:\\XcaliburData\\EDS-test\\AlFeGa-acac-1\\spectra_only\\near_7994.EDS"
             ],
             "console": "integratedTerminal"
         },
