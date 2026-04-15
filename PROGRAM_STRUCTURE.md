@@ -273,7 +273,11 @@ self.model.fit()
 
 **Advantages**:
 - Background shape is fixed (measured)
-- Only amplitude is fitted (1 parameter instead of ~10 for bg_elements)
+- In the optimized path, only `yscale` is fitted during the initial fit.
+- `shift` can be refined later during fine-tuning if the measured background is
+  slightly offset from the sample spectrum.
+- `xscale` is fixed at 1.0 because floating it adds a costly nonlinear degree
+  of freedom with negligible benefit for spectra on the same energy calibration.
 - More accurate for complex background shapes
 - Lower parameter count → faster fitting
 
@@ -289,7 +293,9 @@ For a typical fit with 8 elements + background spectrum:
 Component          | Parameters | Free? | Notes
 -------------------+------------+-------+---------------------------
 Polynomial_bg      | 7 coeffs   | Yes   | Slowly-varying continuum
-instrument (bg)    | 1 scale    | Yes   | Background spectrum amplitude
+instrument yscale  | 1 scale    | Yes   | Background spectrum amplitude
+instrument shift   | 1 value    | No*   | Optional BG/signal offset
+instrument xscale  | 1 value    | No    | Fixed to 1.0
 Element 1 lines    | 1 intensity| Yes   | Per element (family)
 Element 2 lines    | 1 intensity| Yes   |
 ...                | ...        | ...   |
@@ -297,7 +303,7 @@ Element N lines    | 1 intensity| Yes   |
 EDS resolution     | 1 value    | No*   | Energy resolution (eV)
 EDS offset         | 1 value    | No*   | Energy axis offset (keV)
 -------------------+------------+-------+---------------------------
-Total              | ~20 params | ~20   | *freed during calibration
+Total              | ~18 params | ~18   | *shift can be freed during fine-tuning
 ```
 
 ### Parameter States
@@ -366,10 +372,11 @@ These cause poor chi-square even when element selection is correct.
 ```python
 def fine_tune_model(self):
     """
-    Three-step calibration process:
+    Four-step calibration process:
     1. Offset calibration (all params free)
-    2. Resolution calibration (LOCKED PARAMS for speed)
-    3. Final refinement fit (all params free)
+    2. Background shift refinement (bg_spec mode only)
+    3. Resolution calibration (LOCKED PARAMS for speed)
+    4. Final refinement fit
     """
 ```
 
@@ -397,7 +404,18 @@ After offset calibration:
   χ²ᵣ: 615.61 (Δ = -131.42, -17.6%)
 ```
 
-#### Step 2: Energy Resolution Calibration ⭐ **KEY OPTIMIZATION**
+#### Step 2: Background Shift Refinement
+**Goal**: Allow a small x-shift between the measured background spectrum and the sample peaks
+
+**Why it is separate**:
+- During the initial fit, `instrument.shift` is fixed so the model stays fast and well-conditioned
+- After the peak offset is calibrated, `instrument.shift` can be refined without coupling it to the peak-position calibration
+
+**Typical behavior**:
+- Frees only `instrument.shift` and `instrument.yscale`
+- Fits the background alignment against otherwise fixed peak/background parameters
+- Useful when background and sample spectra have a small relative offset
+#### Step 3: Energy Resolution Calibration ⭐ **KEY OPTIMIZATION**
 **Goal**: Adjust detector resolution to match line widths
 
 **Problem**: If all 20 parameters are free, this step takes ~77 seconds and hits maxfev warnings!
@@ -436,7 +454,7 @@ After resolution calibration (with locked parameters):
 
 **Critical**: Without parameter locking, this step is 20-25x slower and can freeze the GUI!
 
-#### Step 3: Final Refinement Fit
+#### Step 4: Final Refinement Fit
 **Goal**: Re-optimize all parameters with corrected energy axis
 
 ```python
@@ -460,11 +478,12 @@ After final refinement fit:
 **Target**: Fine-tuning should be comparable to initial fit time
 
 ```
-Initial fit:     ~6 seconds
-Fine-tuning:     ~6 seconds (1.0x)
-  - Offset calib:    ~4s
-  - Resolution calib: ~1s (with locked params)
-  - Final fit:        ~1s
+Initial fit:     ~2-4 seconds
+Fine-tuning:     ~3-6 seconds
+  - Offset calib:              ~1-2s
+  - Background shift refine:   ~1s
+  - Resolution calib:          ~1s (with locked params)
+  - Final fit:                 ~1s
 Total improvement: ~25% chi-square reduction
 ```
 
@@ -634,9 +653,12 @@ class MyWidget(QtWidgets.QWidget):
 
 ### Bottlenecks
 
-1. **Model fitting**: ~6 seconds per spectrum
-   - Dominated by scipy optimization
-   - Scales with number of parameters (~20 typically)
+1. **Model fitting**: ~1-2 seconds per spectrum after optimization
+   - Previously ~6-12 seconds per spectrum in this environment
+   - Dominated by repeated model evaluation inside scipy optimization
+   - Key fixes:
+     - Fix `ScalableFixedPattern.xscale` at 1.0
+     - Force `numexpr` to one thread during fitting/calibration for small 1D EDS spectra
 
 2. **Resolution calibration without parameter locking**: ~77 seconds
    - Causes GUI freezing
@@ -650,7 +672,18 @@ class MyWidget(QtWidgets.QWidget):
 **Impact**: 25x speedup for resolution calibration  
 **Implementation**: See [Fine-Tuning Algorithm](#fine-tuning-algorithm)
 
-#### 2. Lazy Computation
+#### 2. Disable Pointless Background X-Scaling
+**Impact**: Large speedup with negligible chi-square change  
+**Implementation**: In `bg_spec` mode, set `instrument.xscale.free = False`
+
+#### 3. Use Single-Thread numexpr for Small EDS Fits
+**Impact**: Large speedup on typical 4096-channel spectra  
+**Why**: HyperSpy evaluates many small component arrays; `numexpr`'s default
+multi-threading overhead dominates for this workload  
+**Implementation**: Wrap fit/calibration calls in a context that temporarily sets
+`numexpr` threads to 1
+
+#### 4. Lazy Computation
 **Pattern**: Don't compute until needed
 ```python
 def _compute_fitted_signals(self):
@@ -662,7 +695,7 @@ def _compute_fitted_signals(self):
     # ... compute and cache
 ```
 
-#### 3. Avoid Redundant Fits
+#### 5. Avoid Redundant Fits
 **Pattern**: Check if refit is actually needed
 ```python
 def set_elements(self, elements):
@@ -672,7 +705,7 @@ def set_elements(self, elements):
     # ... proceed with refit
 ```
 
-#### 4. Batch Operations
+#### 6. Batch Operations
 **Pattern**: Fit all spectra in one loop instead of individually
 ```python
 def fit_all(self):
@@ -686,8 +719,8 @@ def fit_all(self):
 Operation                    | Target Time | Notes
 -----------------------------+-------------+-------------------------
 Load spectrum                | <1s         | I/O bound
-Initial fit (8 elements)     | 5-7s        | scipy optimization
-Fine-tune                    | 5-7s        | Same as initial fit
+Initial fit (8 elements)     | 1-2s        | Optimized bg_spec path
+Fine-tune                    | 1-2s        | Same as initial fit
 Compute summed intensities   | <0.5s       | No fitting required
 Export plot (PNG)            | 1-2s        | Matplotlib rendering
 ```
@@ -713,8 +746,8 @@ python tests/test_fine_tune_timing.py
 
 **Expected output**:
 ```
-Initial fit took: 6.65s
-Fine-tune took: 6.42s (1.0x)
+Initial fit took: ~1.4s
+Fine-tune took: ~1.4s (1.0x)
 ✓ Fine-tuning time is reasonable (1.0x initial fit time)
 ```
 
@@ -753,10 +786,13 @@ Fine-tune took: 6.42s (1.0x)
 2. ✅ **Lock parameters during resolution calibration** - critical for performance
 3. ✅ **Default energy resolution is 128 eV** (not HyperSpy's 133 eV)
 4. ✅ **Use bg_spec mode** with ScalableFixedPattern when possible
-5. ✅ **Changing elements triggers auto-refit** - prevents model/element mismatch
-6. ✅ **Fine-tuning should be ~1.0x initial fit time** - use timing test to verify
-7. ✅ **Calibration methods include fitting** - explicit fit() calls are optional but help
-8. ✅ **exspy doesn't auto-lock parameters** - must do manually
+5. ✅ **Fix `instrument.xscale` at 1.0** - it adds costly nonlinearity with negligible benefit
+6. ✅ **Keep `instrument.shift` fixed during the initial fit** - refine it only during fine-tuning if needed
+7. ✅ **Force `numexpr` to 1 thread during EDS fitting** - default multithreading is much slower for 4k-channel spectra
+8. ✅ **Changing elements triggers auto-refit** - prevents model/element mismatch
+9. ✅ **Fine-tuning should stay in the same order of magnitude as the initial fit** - use timing tests to verify
+10. ✅ **Calibration methods include fitting** - explicit fit() calls are optional but help
+11. ✅ **exspy doesn't auto-lock parameters** - must do manually
 
 **Most Critical Code Section**: Fine-tuning parameter locking (see lines 236-320 in `eds_session.py`)
 

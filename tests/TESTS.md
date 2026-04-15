@@ -47,36 +47,42 @@ conda run -n eds-mini python tests\test_fine_tune_gui.py
 ```
 === Test: Fine-tune Timing ===
 Initial fit...
-  Initial fit took: 10.04s
-  Initial χ²ᵣ: 747.04
+  Initial fit took: ~3s
+  Initial χ²ᵣ: 790.78
 
 Fine-tuning...
 === Fine-tuning grain1_thin ===
-Initial χ²ᵣ: 747.04
+Initial χ²ᵣ: 790.78
 Initial offset: -0.002152 keV
 Initial resolution: 128.00 eV
+Initial BG shift: 0.000000 keV
 
 After offset calibration:
-  Offset: 0.001914 keV (Δ = 4.07 eV)
-  χ²ᵣ: 615.61 (Δ = -131.42, -17.6%)
+  Offset: 0.002169 keV (Δ = 4.32 eV)
+  χ²ᵣ: 622.01 (Δ = -168.77, -21.3%)
+
+After background shift refinement:
+  BG shift: 0.002733 keV (Δ = 2.73 eV)
+  χ²ᵣ: 614.50
 
 After resolution calibration (with locked parameters):
-  Resolution: 126.53 eV (Δ = -1.47 eV)
-  χ²ᵣ: 585.38 (Δ = -30.23, -4.9%)
+  Resolution: 127.21 eV (Δ = -0.79 eV)
+  χ²ᵣ: 560.55 (Δ = -53.95, -8.8%)
 
 After final refinement fit:
-  χ²ᵣ: 560.47 (Δ = -24.92, -4.3%)
+  χ²ᵣ: 582.96 (Δ = 22.41, 4.0%)
 
 --- Summary ---
-Total offset change: +4.07 eV
-Total resolution change: -1.47 eV
-χ²ᵣ: 747.04 → 560.47 (+25.0%)
+Total offset change: +4.32 eV
+Total resolution change: -0.79 eV
+Total BG shift change: +2.73 eV
+χ²ᵣ: 790.78 → 582.96 (+26.3%)
 
-  Fine-tune took: 8.20s
-  After fine-tuning χ²ᵣ: 560.47
-  Improvement: 91.5%
+  Fine-tune took: ~3s
+  After fine-tuning χ²ᵣ: 582.96
+  Improvement: 91.2%
 
-✓ Fine-tuning time is reasonable (0.8x initial fit time)
+✓ Fine-tuning time is reasonable (~1.0x initial fit time)
 ```
 
 **Success Criteria**:
@@ -190,6 +196,7 @@ All tests completed!
 **Success Criteria**:
 - ✅ bg_elements mode: 79 components (sample + bg elements + polynomial)
 - ✅ bg_spec mode: 21 components (sample + polynomial + instrument)
+- ✅ bg_spec mode keeps `instrument.xscale` and `instrument.shift` fixed in the initial fit
 - ✅ All 3 correction modes work
 - ✅ Fallback to 'none' when conditions not met
 
@@ -486,7 +493,7 @@ bg_near_grain1_thick.eds   - Background spectrum for thick section
 | Test | Status | Time | Notes |
 |------|--------|------|-------|
 | test_default_resolution.py | ✅ PASS | <1s | 128 eV confirmed |
-| test_fine_tune_timing.py | ✅ PASS | ~18s | 0.8x initial fit time |
+| test_fine_tune_timing.py | ✅ PASS | ~6s | ~1.0x initial fit time |
 | test_bg_handling.py | ✅ PASS | ~25s | All modes work |
 | test_session_bg_handling.py | ✅ PASS | ~30s | Propagation correct |
 | test_refit_on_element_change.py | ✅ PASS | ~20s | Auto-refit works |

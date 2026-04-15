@@ -1,6 +1,7 @@
 import os
 import sys
 import io
+from contextlib import contextmanager
 from typing import List, Dict, Optional, Any
 import pandas as pd
 import hyperspy.api as hs
@@ -8,6 +9,29 @@ import exspy
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
+
+try:
+    import numexpr
+except ImportError:  # pragma: no cover - HyperSpy falls back to numpy without numexpr.
+    numexpr = None
+
+
+@contextmanager
+def _small_signal_numexpr():
+    """
+    HyperSpy evaluates many small 1D component arrays during EDS fitting.
+    For ~4k-channel spectra, numexpr's default multi-threading overhead is
+    much slower than a single worker.
+    """
+    if numexpr is None:
+        yield
+        return
+
+    previous_threads = numexpr.set_num_threads(1)
+    try:
+        yield
+    finally:
+        numexpr.set_num_threads(previous_threads)
 
 class EDSSpectrumRecord:
     def __init__(self, path: str):
@@ -203,12 +227,21 @@ class EDSSpectrumRecord:
                 # Add ScalableFixedPattern component for instrument background
                 comp_bg = hs.model.components1D.ScalableFixedPattern(self._background)
                 comp_bg.name = 'instrument'
+                # Instrument/background spectra should share the same energy calibration.
+                # Letting xscale float makes the whole fit nonlinear with negligible benefit.
+                comp_bg.xscale.free = False
+                # Keep the background shift fixed during the initial fit.
+                # If needed, fine_tune_model() can refine it later.
+                comp_bg.shift.free = False
                 self.model.append(comp_bg)
             else:
                 raise ValueError(f"Unknown bg_fit_mode: {self.bg_fit_mode}")
             
-            # Perform the fit
-            self.model.fit()
+            # Perform the fit. In bg_spec mode with xscale/shift fixed, the
+            # model is linear and can use the much faster linear solver.
+            fit_kwargs = {'optimizer': 'lstsq'} if self.bg_fit_mode == 'bg_spec' else {}
+            with _small_signal_numexpr():
+                self.model.fit(**fit_kwargs)
             self.fitted_intensities = self.model.get_lines_intensity()
             
             # Compute reduced chi-square (extract scalar from array if needed)
@@ -232,8 +265,50 @@ class EDSSpectrumRecord:
             self.signal_clean = None
             self.signal_bg = None
             self.reduced_chisq = None
+
+    def _get_instrument_component(self):
+        if self.model is None:
+            return None
+
+        for component in self.model:
+            if component.name == 'instrument':
+                return component
+        return None
+
+    def _refine_background_shift(self, initial_bg_shift: float):
+        """
+        Refine the measured background alignment separately from the peak offset.
+        """
+        instrument = self._get_instrument_component()
+        if instrument is None:
+            return None, None
+
+        previously_free = []
+        for component in self.model:
+            for param in component.parameters:
+                if param.free:
+                    previously_free.append(param)
+                    param.free = False
+
+        instrument.shift.free = True
+        instrument.yscale.free = True
+
+        try:
+            with _small_signal_numexpr():
+                self.model.fit()
+        finally:
+            for param in previously_free:
+                param.free = True
+            instrument.shift.free = False
+
+        bg_shift = instrument.shift.value
+        chisq = float(self.model.red_chisq.data.item() if hasattr(self.model.red_chisq.data, 'item') else self.model.red_chisq.data)
+        print(f"\nAfter background shift refinement:")
+        print(f"  BG shift: {bg_shift:.6f} keV (Δ = {(bg_shift - initial_bg_shift) * 1000:.2f} eV)")
+        print(f"  χ²ᵣ: {chisq:.2f}")
+        return bg_shift, chisq
     
-    def fine_tune_model(self):
+    def _fine_tune_model_legacy(self):
         """
         Fine-tune the fitted model using energy axis calibration.
         Calibrates energy offset and resolution to improve fit quality.
@@ -255,7 +330,8 @@ class EDSSpectrumRecord:
             
             # Step 1: Calibrate energy offset
             # This includes internal fitting with all parameters free
-            self.model.calibrate_energy_axis(calibrate='offset')
+            with _small_signal_numexpr():
+                self.model.calibrate_energy_axis(calibrate='offset')
             offset_1 = self.signal.axes_manager[-1].offset
             chisq_1 = float(self.model.red_chisq.data.item() if hasattr(self.model.red_chisq.data, 'item') else self.model.red_chisq.data)
             print(f"\nAfter offset calibration:")
@@ -274,7 +350,8 @@ class EDSSpectrumRecord:
                             locked_params.append(param)
                 
                 # Now do resolution calibration (will unlock resolution parameter internally)
-                self.model.calibrate_energy_axis(calibrate='resolution')
+                with _small_signal_numexpr():
+                    self.model.calibrate_energy_axis(calibrate='resolution')
                 
                 # Unlock the parameters we locked
                 for param in locked_params:
@@ -294,7 +371,8 @@ class EDSSpectrumRecord:
                 resolution_2 = initial_resolution
             
             # Step 3: Final refinement fit with all parameters free
-            self.model.fit()
+            with _small_signal_numexpr():
+                self.model.fit()
             final_chisq = float(self.model.red_chisq.data.item() if hasattr(self.model.red_chisq.data, 'item') else self.model.red_chisq.data)
             if abs(final_chisq - chisq_2) > 0.01:
                 print(f"\nAfter final refinement fit:")
@@ -329,6 +407,109 @@ class EDSSpectrumRecord:
         except Exception as e:
             raise RuntimeError(f"Could not fine-tune model for {self.name}: {e}")
     
+    def fine_tune_model(self):
+        """
+        Fine-tune the fitted model using energy axis calibration.
+        Calibrates peak offset and detector resolution, and in bg_spec mode
+        can also refine a separate background shift.
+        """
+        if self.model is None:
+            raise ValueError(f"No fitted model to fine-tune for {self.name}")
+
+        try:
+            initial_chisq = float(self.model.red_chisq.data.item() if hasattr(self.model.red_chisq.data, 'item') else self.model.red_chisq.data)
+            initial_offset = self.signal.axes_manager[-1].offset
+            initial_resolution = self.signal.metadata.Acquisition_instrument.TEM.Detector.EDS.energy_resolution_MnKa
+            instrument = self._get_instrument_component()
+            initial_bg_shift = instrument.shift.value if instrument is not None else None
+
+            print(f"\n=== Fine-tuning {self.name} ===")
+            print(f"Initial χ²ᵣ: {initial_chisq:.2f}")
+            print(f"Initial offset: {initial_offset:.6f} keV")
+            print(f"Initial resolution: {initial_resolution:.2f} eV")
+            if initial_bg_shift is not None:
+                print(f"Initial BG shift: {initial_bg_shift:.6f} keV")
+
+            # Step 1: calibrate the peak offset while the background stays fixed.
+            if instrument is not None:
+                instrument.shift.free = False
+            with _small_signal_numexpr():
+                self.model.calibrate_energy_axis(calibrate='offset')
+            offset_1 = self.signal.axes_manager[-1].offset
+            chisq_1 = float(self.model.red_chisq.data.item() if hasattr(self.model.red_chisq.data, 'item') else self.model.red_chisq.data)
+            print(f"\nAfter offset calibration:")
+            print(f"  Offset: {offset_1:.6f} keV (Δ = {(offset_1 - initial_offset) * 1000:.2f} eV)")
+            print(f"  χ²ᵣ: {chisq_1:.2f} (Δ = {chisq_1 - initial_chisq:.2f}, {((chisq_1 / initial_chisq - 1) * 100):.1f}%)")
+
+            # Step 2: refine the background shift separately, if present.
+            if initial_bg_shift is not None:
+                _, chisq_2 = self._refine_background_shift(initial_bg_shift)
+            else:
+                chisq_2 = chisq_1
+
+            # Step 3: calibrate energy resolution with all other params locked.
+            try:
+                locked_params = []
+                for component in self.model:
+                    for param in component.parameters:
+                        if param.free:
+                            param.free = False
+                            locked_params.append(param)
+
+                with _small_signal_numexpr():
+                    self.model.calibrate_energy_axis(calibrate='resolution')
+
+                for param in locked_params:
+                    param.free = True
+
+                resolution_2 = self.signal.metadata.Acquisition_instrument.TEM.Detector.EDS.energy_resolution_MnKa
+                chisq_3 = float(self.model.red_chisq.data.item() if hasattr(self.model.red_chisq.data, 'item') else self.model.red_chisq.data)
+                print(f"\nAfter resolution calibration (with locked parameters):")
+                print(f"  Resolution: {resolution_2:.2f} eV (Δ = {resolution_2 - initial_resolution:.2f} eV)")
+                print(f"  χ²ᵣ: {chisq_3:.2f} (Δ = {chisq_3 - chisq_2:.2f}, {((chisq_3 / chisq_2 - 1) * 100):.1f}%)")
+            except Exception as e:
+                for param in locked_params:
+                    param.free = True
+                print(f"\nNote: Resolution calibration failed: {e}")
+                chisq_3 = chisq_2
+                resolution_2 = initial_resolution
+
+            # Step 4: final refinement fit with the refined background shift fixed.
+            if instrument is not None:
+                instrument.shift.free = False
+            with _small_signal_numexpr():
+                self.model.fit(optimizer='lstsq')
+            final_chisq = float(self.model.red_chisq.data.item() if hasattr(self.model.red_chisq.data, 'item') else self.model.red_chisq.data)
+            if abs(final_chisq - chisq_3) > 0.01:
+                print(f"\nAfter final refinement fit:")
+                print(f"  χ²ᵣ: {final_chisq:.2f} (Δ = {final_chisq - chisq_3:.2f}, {((final_chisq / chisq_3 - 1) * 100):.1f}%)")
+
+            final_resolution = self.signal.metadata.Acquisition_instrument.TEM.Detector.EDS.energy_resolution_MnKa
+            final_offset = self.signal.axes_manager[-1].offset
+            final_bg_shift = instrument.shift.value if instrument is not None else None
+            total_offset_change = (final_offset - initial_offset) * 1000
+            total_resolution_change = final_resolution - initial_resolution
+            total_chisq_improvement = ((1 - final_chisq / initial_chisq) * 100)
+
+            print(f"\n--- Summary ---")
+            print(f"Total offset change: {total_offset_change:+.2f} eV")
+            print(f"Total resolution change: {total_resolution_change:+.2f} eV")
+            if final_bg_shift is not None and initial_bg_shift is not None:
+                print(f"Total BG shift change: {(final_bg_shift - initial_bg_shift) * 1000:+.2f} eV")
+            print(f"χ²ᵣ: {initial_chisq:.2f} → {final_chisq:.2f} ({total_chisq_improvement:+.1f}%)")
+
+            self.fitted_intensities = self.model.get_lines_intensity()
+            if hasattr(self.model, 'red_chisq'):
+                chisq_data = self.model.red_chisq.data
+                self.reduced_chisq = float(chisq_data) if hasattr(chisq_data, '__float__') else float(chisq_data.item())
+            else:
+                self.reduced_chisq = None
+
+            self._compute_fitted_signals()
+
+        except Exception as e:
+            raise RuntimeError(f"Could not fine-tune model for {self.name}: {e}")
+
     def _compute_fitted_signals(self):
         """
         Compute clean and background signals after fitting.
