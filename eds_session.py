@@ -62,8 +62,8 @@ class EDSSpectrumRecord:
         self.bg_fit_mode: str = 'bg_spec'  # 'bg_elements' or 'bg_spec'
         
         # Fitted signals (computed after fitting for efficiency)
-        self.fitted_external_clean_signal: Optional[exspy.signals.EDSTEMSpectrum] = None
-        self.fitted_external_bg_signal: Optional[exspy.signals.EDSTEMSpectrum] = None
+        self.fitted_reference_clean_signal: Optional[exspy.signals.EDSTEMSpectrum] = None
+        self.fitted_reference_bg_signal: Optional[exspy.signals.EDSTEMSpectrum] = None
         self.signal_clean: Optional[exspy.signals.EDSTEMSpectrum] = None  # Legacy alias
         self.signal_bg: Optional[exspy.signals.EDSTEMSpectrum] = None  # Legacy alias
         self.reduced_chisq: Optional[float] = None  # Reduced chi-square from fit
@@ -83,7 +83,7 @@ class EDSSpectrumRecord:
             mapping = {
                 'raw': 'none',
                 'measured_bg_subtracted': 'subtract_spectra',
-                'fitted_external_bg_subtracted': 'subtract_fitted',
+                'fitted_reference_bg_subtracted': 'subtract_fitted',
             }
             self.bg_correction_mode = mapping[self.display_signal_mode]
         else:
@@ -94,7 +94,7 @@ class EDSSpectrumRecord:
         suffix_map = {
             'raw': '',
             'measured_bg_subtracted': ', Measured BG Subtracted',
-            'fitted_external_bg_subtracted': ', Fitted External BG Subtracted',
+            'fitted_reference_bg_subtracted': ', Fitted Reference BG Subtracted',
         }
         return f"X-rays ({unit.capitalize()}{suffix_map[mode]})"
 
@@ -170,8 +170,8 @@ class EDSSpectrumRecord:
     def has_bg_element_overlap(self) -> bool:
         return bool(set(self.elements) & set(self.bg_elements))
 
-    def can_use_fitted_external_bg_subtraction(self) -> bool:
-        if self.model is None or self.fitted_external_bg_signal is None:
+    def can_use_fitted_reference_bg_subtraction(self) -> bool:
+        if self.model is None or self.fitted_reference_bg_signal is None:
             return False
         if self.bg_fit_mode == 'bg_spec':
             return True
@@ -179,19 +179,23 @@ class EDSSpectrumRecord:
             return not self.has_bg_element_overlap()
         return False
 
+    def can_use_fitted_external_bg_subtraction(self) -> bool:
+        """Compatibility alias."""
+        return self.can_use_fitted_reference_bg_subtraction()
+
     def _validate_signal_mode(self, mode: str):
-        valid_modes = ('raw', 'measured_bg_subtracted', 'fitted_external_bg_subtracted')
+        valid_modes = ('raw', 'measured_bg_subtracted', 'fitted_reference_bg_subtracted')
         if mode not in valid_modes:
             raise ValueError(f"mode must be one of {valid_modes}")
         if mode == 'measured_bg_subtracted' and self._background is None:
             raise ValueError(f"Measured background subtraction requires a loaded background spectrum for {self.name}")
-        if mode == 'fitted_external_bg_subtracted' and not self.can_use_fitted_external_bg_subtraction():
+        if mode == 'fitted_reference_bg_subtracted' and not self.can_use_fitted_reference_bg_subtraction():
             if self.bg_fit_mode == 'bg_elements' and self.has_bg_element_overlap():
                 raise ValueError(
-                    f"Fitted external background subtraction is unavailable for {self.name}: "
+                    f"Fitted reference background subtraction is unavailable for {self.name}: "
                     "background elements overlap sample elements."
                 )
-            raise ValueError(f"Fitted external background subtraction is unavailable for {self.name}")
+            raise ValueError(f"Fitted reference background subtraction is unavailable for {self.name}")
 
     def _normalize_signal_modes(self):
         for attr in ('display_signal_mode', 'peak_sum_signal_mode'):
@@ -231,9 +235,9 @@ class EDSSpectrumRecord:
             return self._make_signal_from_counts(self._signal.data, unit, mode)
         if mode == 'measured_bg_subtracted':
             return self._make_signal_from_counts(self._get_measured_bg_counts(), unit, mode)
-        if mode == 'fitted_external_bg_subtracted':
+        if mode == 'fitted_reference_bg_subtracted':
             self._validate_signal_mode(mode)
-            return self._make_signal_from_cps(self.fitted_external_clean_signal.data, unit, mode)
+            return self._make_signal_from_cps(self.fitted_reference_clean_signal.data, unit, mode)
         raise ValueError(f"Unknown signal mode: {mode}")
 
     def get_signal_for_display(self, unit: Optional[str] = None):
@@ -246,27 +250,27 @@ class EDSSpectrumRecord:
         return self._get_signal_for_mode(self.peak_sum_signal_mode, unit=unit)
 
     def uses_model_plot(self) -> bool:
-        return self.model is not None and self.display_signal_mode in ('raw', 'fitted_external_bg_subtracted')
+        return self.model is not None and self.display_signal_mode in ('raw', 'fitted_reference_bg_subtracted')
 
-    def _get_fitted_bg_data_for_plot(self):
+    def _get_reference_bg_data_for_plot(self):
         if self.signal_bg is None:
             return None
         return self.signal_bg._get_current_data()
 
-    def _signal_minus_fitted_bg_for_plot(self, **kwargs):
-        bg_data = self._get_fitted_bg_data_for_plot()
+    def _signal_minus_reference_bg_for_plot(self, **kwargs):
+        bg_data = self._get_reference_bg_data_for_plot()
         if bg_data is None:
             return self._fit_signal._get_current_data()
         return self._fit_signal._get_current_data() - bg_data
 
-    def _model_minus_fitted_bg_for_plot(self, axes_manager, out_of_range2nans=True):
+    def _model_minus_reference_bg_for_plot(self, axes_manager, out_of_range2nans=True):
         model_data = self.model._model2plot(axes_manager, out_of_range2nans=out_of_range2nans)
-        bg_data = self._get_fitted_bg_data_for_plot()
+        bg_data = self._get_reference_bg_data_for_plot()
         if bg_data is None:
             return model_data
         return model_data - bg_data
 
-    def _apply_fitted_bg_subtracted_plot_callbacks(self):
+    def _apply_fitted_reference_bg_subtracted_plot_callbacks(self):
         if self.model is None or self._fit_signal._plot is None:
             return
 
@@ -275,11 +279,11 @@ class EDSSpectrumRecord:
             return
 
         signal_line = signal_plot.ax_lines[0]
-        signal_line.data_function = self._signal_minus_fitted_bg_for_plot
+        signal_line.data_function = self._signal_minus_reference_bg_for_plot
         signal_line.update(render_figure=False, update_ylimits=False)
 
         if self.model._model_line is not None:
-            self.model._model_line.data_function = self._model_minus_fitted_bg_for_plot
+            self.model._model_line.data_function = self._model_minus_reference_bg_for_plot
             self.model._model_line.update(render_figure=False, update_ylimits=False)
 
         if self.model._residual_line is not None:
@@ -471,8 +475,8 @@ class EDSSpectrumRecord:
             print(f"Warning: Could not fit model for {self.name}: {e}")
             self.model = None
             self.fitted_intensities = None
-            self.fitted_external_clean_signal = None
-            self.fitted_external_bg_signal = None
+            self.fitted_reference_clean_signal = None
+            self.fitted_reference_bg_signal = None
             self.signal_clean = None
             self.signal_bg = None
             self.reduced_chisq = None
@@ -733,8 +737,8 @@ class EDSSpectrumRecord:
         Called automatically after fit_model() for efficiency.
         """
         if self.model is None:
-            self.fitted_external_clean_signal = None
-            self.fitted_external_bg_signal = None
+            self.fitted_reference_clean_signal = None
+            self.fitted_reference_bg_signal = None
             self.signal_clean = None
             self.signal_bg = None
             return
@@ -758,21 +762,21 @@ class EDSSpectrumRecord:
                         bg_component_names.append(comp.name)
 
             if bg_component_names:
-                self.fitted_external_bg_signal = self.model.as_signal(component_list=bg_component_names)
-                self.fitted_external_clean_signal = self._fit_signal - self.fitted_external_bg_signal
+                self.fitted_reference_bg_signal = self.model.as_signal(component_list=bg_component_names)
+                self.fitted_reference_clean_signal = self._fit_signal - self.fitted_reference_bg_signal
             else:
-                self.fitted_external_bg_signal = None
-                self.fitted_external_clean_signal = None
+                self.fitted_reference_bg_signal = None
+                self.fitted_reference_clean_signal = None
 
-            self.signal_bg = self.fitted_external_bg_signal
-            self.signal_clean = self.fitted_external_clean_signal
+            self.signal_bg = self.fitted_reference_bg_signal
+            self.signal_clean = self.fitted_reference_clean_signal
                  
         except Exception as e:
             print(f"Warning: Could not compute fitted signals for {self.name}: {e}")
             import traceback
             traceback.print_exc()
-            self.fitted_external_clean_signal = None
-            self.fitted_external_bg_signal = None
+            self.fitted_reference_clean_signal = None
+            self.fitted_reference_bg_signal = None
             self.signal_clean = None
             self.signal_bg = None
 
@@ -822,8 +826,8 @@ class EDSSpectrumRecord:
                     navigator=None,
                     **kwargs
                 )
-                if self.display_signal_mode == 'fitted_external_bg_subtracted':
-                    self._apply_fitted_bg_subtracted_plot_callbacks()
+                if self.display_signal_mode == 'fitted_reference_bg_subtracted':
+                    self._apply_fitted_reference_bg_subtracted_plot_callbacks()
             else:
                 plot_signal.plot(show_lines, navigator=None, **kwargs)
         finally:
@@ -838,7 +842,7 @@ class EDSSpectrumRecord:
         fig_new = plot_signal._plot.signal_plot.figure
         ax_new = plot_signal._plot.signal_plot.ax
         
-        # Plot fitted external background if requested and available.
+        # Plot fitted reference background if requested and available.
         if show_background and self.signal_bg is not None:
             if use_model:
                 bg_signal = self.signal_bg
@@ -846,7 +850,7 @@ class EDSSpectrumRecord:
                 bg_signal = self._make_signal_from_cps(
                     self.signal_bg.data,
                     unit=self.signal_unit,
-                    mode='fitted_external_bg_subtracted',
+                    mode='fitted_reference_bg_subtracted',
                 )
             energy_axis = bg_signal.axes_manager['Energy'].axis
             # Fill area with transparency
@@ -882,7 +886,7 @@ class EDSSpectrumRecord:
             return None
 
     def set_background(self, bg_signal: exspy.signals.EDSTEMSpectrum):
-        """Set the measured external background spectrum without changing active signal modes."""
+        """Set the measured reference background spectrum without changing active signal modes."""
         self._background = bg_signal
         self._background_fit_signal = self._make_cps_signal(bg_signal)
         self._refresh_display_signal_cache()
@@ -899,7 +903,7 @@ class EDSSpectrumRecord:
         mode_map = {
             'none': 'raw',
             'subtract_spectra': 'measured_bg_subtracted',
-            'subtract_fitted': 'fitted_external_bg_subtracted',
+            'subtract_fitted': 'fitted_reference_bg_subtracted',
         }
         signal_mode = mode_map[mode]
         self.set_display_signal_mode(signal_mode)
@@ -917,7 +921,7 @@ class EDSSpectrumRecord:
         """Legacy helper retained for compatibility with old callers."""
         suffix_map = {
             'none': '',
-            'subtract_fitted': ', Fitted External BG Subtracted',
+            'subtract_fitted': ', Fitted Reference BG Subtracted',
             'subtract_spectra': ', Measured BG Subtracted',
             'mixed': ', Mixed BG Modes',
         }
@@ -963,8 +967,8 @@ class EDSSpectrumRecord:
             # Invalidate existing fit
             self.model = None
             self.fitted_intensities = None
-            self.fitted_external_clean_signal = None
-            self.fitted_external_bg_signal = None
+            self.fitted_reference_clean_signal = None
+            self.fitted_reference_bg_signal = None
             self.signal_clean = None
             self.signal_bg = None
             self.reduced_chisq = None

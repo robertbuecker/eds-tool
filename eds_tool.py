@@ -40,8 +40,8 @@ AUTO_SPECTRUM_FORMATS = ['emsa', 'csv']  # Formats for spectrum export
 AUTO_PLOT_FORMATS = ['png', 'svg', 'jpg']  # Formats for plot export (BMP not supported by matplotlib)
 SIGNAL_MODE_ITEMS = [
     ("raw", "Raw"),
-    ("measured_bg_subtracted", "Measured BG subtracted"),
-    ("fitted_external_bg_subtracted", "Fitted external BG subtracted"),
+    ("fitted_reference_bg_subtracted", "Fitted reference"),
+    ("measured_bg_subtracted", "Subtract measured"),
 ]
 
 def auto_workflow(session: EDSSession, max_energy: Optional[float] = None, use_cps: bool = False):
@@ -157,12 +157,8 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         spectrum_layout.setContentsMargins(10, 14, 10, 10)
         spectrum_layout.setSpacing(8)
 
-        add_row = QtWidgets.QHBoxLayout()
         self.add_file_btn = QtWidgets.QPushButton("Add .eds File")
         self.add_dir_btn = QtWidgets.QPushButton("Add Directory (recursive)")
-        add_row.addWidget(self.add_file_btn)
-        add_row.addWidget(self.add_dir_btn)
-        spectrum_layout.addLayout(add_row)
         self.add_file_btn.clicked.connect(self.add_file)
         self.add_dir_btn.clicked.connect(self.add_directory)
 
@@ -199,6 +195,11 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self.remove_all_btn = QtWidgets.QPushButton("Remove All")
         self.remove_spec_btn.setMinimumHeight(28)
         self.remove_all_btn.setMinimumHeight(28)
+        self.add_file_btn.setMinimumHeight(28)
+        self.add_dir_btn.setMinimumHeight(28)
+        spectrum_actions.addWidget(self.add_file_btn)
+        spectrum_actions.addWidget(self.add_dir_btn)
+        spectrum_actions.addSpacing(4)
         spectrum_actions.addWidget(self.remove_spec_btn)
         spectrum_actions.addWidget(self.remove_all_btn)
         self.remove_spec_btn.clicked.connect(self.remove_selected_spectrum)
@@ -264,22 +265,20 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         setup_layout.addLayout(bg_el_layout)
         self.bg_el_edit.textChanged.connect(self.apply_bg_elements)
 
-        self.bg_file_label = QtWidgets.QLabel("No background loaded")
-        self.bg_file_label.setWordWrap(True)
+        self.bg_file_label = QtWidgets.QLabel("No reference BG loaded")
         self.bg_file_label.setStyleSheet(
             "QLabel { padding: 6px 8px; background: #f5f5f5; border: 1px solid #d9d9d9; border-radius: 4px; color: #555; }"
         )
-        setup_layout.addWidget(self.bg_file_label)
 
         bg_row = QtWidgets.QHBoxLayout()
-        self.bg_open_btn = QtWidgets.QPushButton("Open BG")
+        self.bg_open_btn = QtWidgets.QPushButton("Open Ref BG")
         bg_row.addWidget(self.bg_open_btn)
-        bg_row.addStretch()
+        bg_row.addWidget(self.bg_file_label, 1)
         setup_layout.addLayout(bg_row)
         self.bg_open_btn.clicked.connect(self._on_bg_open)
 
-        fitting_group = QtWidgets.QGroupBox("Fitting and Quantification")
-        fitting_layout = QtWidgets.QVBoxLayout(fitting_group)
+        self.fitting_group = QtWidgets.QGroupBox("Fitting and Quantification")
+        fitting_layout = QtWidgets.QVBoxLayout(self.fitting_group)
         fitting_layout.setContentsMargins(10, 14, 10, 10)
         fitting_layout.setSpacing(8)
 
@@ -361,57 +360,57 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self.advanced_peak_toggle.toggled.connect(self._toggle_advanced_peak_controls)
         self.peak_sum_mode_combo.currentIndexChanged.connect(self._on_peak_sum_mode_changed)
 
-        display_group = QtWidgets.QGroupBox("Display and Tables")
-        display_layout = QtWidgets.QVBoxLayout(display_group)
+        self.display_group = QtWidgets.QGroupBox("Display and Tables")
+        display_layout = QtWidgets.QVBoxLayout(self.display_group)
         display_layout.setContentsMargins(10, 14, 10, 10)
         display_layout.setSpacing(8)
 
         view_row = QtWidgets.QHBoxLayout()
-        view_row.addWidget(QtWidgets.QLabel("Spectrum view:"))
+        view_row.addWidget(QtWidgets.QLabel("View:"))
         self.display_mode_combo = QtWidgets.QComboBox()
         for mode, label in SIGNAL_MODE_ITEMS:
             self.display_mode_combo.addItem(label, mode)
         view_row.addWidget(self.display_mode_combo, 1)
+        self.residual_checkbox = QtWidgets.QCheckBox("Resid.")
+        self.residual_checkbox.setChecked(True)
+        self.residual_checkbox.stateChanged.connect(self.toggle_residual)
+        self.background_checkbox = QtWidgets.QCheckBox("Ref BG")
+        self.background_checkbox.setChecked(False)
+        self.background_checkbox.stateChanged.connect(self.toggle_background)
+        view_row.addWidget(self.residual_checkbox)
+        view_row.addWidget(self.background_checkbox)
         display_layout.addLayout(view_row)
         self.display_mode_combo.currentIndexChanged.connect(self._on_display_mode_changed)
 
         unit_row = QtWidgets.QHBoxLayout()
-        self.signal_unit_label = QtWidgets.QLabel("Signal unit:")
-        self.unit_counts_radio = QtWidgets.QRadioButton("Counts")
-        self.unit_cps_radio = QtWidgets.QRadioButton("CPS")
+        self.reset_zoom_btn = QtWidgets.QPushButton("Reset Zoom")
+        self.reset_y_btn = QtWidgets.QPushButton("Reset Y")
+        self.log_checkbox = QtWidgets.QCheckBox("Log")
+        self.signal_unit_label = QtWidgets.QLabel("Unit:")
+        self.unit_counts_radio = QtWidgets.QRadioButton("cts")
+        self.unit_cps_radio = QtWidgets.QRadioButton("cps")
+        self.x_range_label = QtWidgets.QLabel("X lim:")
+        self.x_range_combo = QtWidgets.QComboBox()
+        for value in (5, 15, 40):
+            self.x_range_combo.addItem(f"{value} kV", float(value))
+        self.x_range_combo.setCurrentIndex(2)
+        unit_row.addWidget(self.reset_zoom_btn)
+        unit_row.addWidget(self.reset_y_btn)
+        unit_row.addWidget(self.log_checkbox)
         unit_row.addWidget(self.signal_unit_label)
         unit_row.addWidget(self.unit_counts_radio)
         unit_row.addWidget(self.unit_cps_radio)
+        unit_row.addWidget(self.x_range_label)
+        unit_row.addWidget(self.x_range_combo)
         unit_row.addStretch()
         display_layout.addLayout(unit_row)
         self.unit_counts_radio.setChecked(True)
         self.unit_counts_radio.toggled.connect(self._on_signal_type_changed)
         self.unit_cps_radio.toggled.connect(self._on_signal_type_changed)
-
-        zoom_row = QtWidgets.QHBoxLayout()
-        self.reset_zoom_btn = QtWidgets.QPushButton("Reset Zoom")
-        self.log_checkbox = QtWidgets.QCheckBox("Log Y")
-        zoom_row.addWidget(self.reset_zoom_btn)
-        zoom_row.addWidget(self.log_checkbox)
-        zoom_row.addStretch()
-        display_layout.addLayout(zoom_row)
         self.reset_zoom_btn.clicked.connect(self.reset_zoom)
+        self.reset_y_btn.clicked.connect(self.reset_y)
         self.log_checkbox.stateChanged.connect(self.toggle_log_y)
-
-        plot_options_row = QtWidgets.QHBoxLayout()
-        self.residual_checkbox = QtWidgets.QCheckBox("Show fit residual")
-        self.residual_checkbox.setChecked(True)
-        self.residual_checkbox.stateChanged.connect(self.toggle_residual)
-        self.background_checkbox = QtWidgets.QCheckBox("Show background")
-        self.background_checkbox.setChecked(False)
-        self.background_checkbox.stateChanged.connect(self.toggle_background)
-        plot_options_row.addWidget(self.residual_checkbox)
-        plot_options_row.addWidget(self.background_checkbox)
-        display_layout.addLayout(plot_options_row)
-        
-        self.chisq_label = QtWidgets.QLabel("Reduced chi^2: -")
-        self.chisq_label.setStyleSheet("QLabel { color: #666; font-style: italic; }")
-        display_layout.addWidget(self.chisq_label)
+        self.x_range_combo.currentIndexChanged.connect(self._on_x_range_changed)
 
         # Row 10: Intensities (sum) | Intensities (fit)
         table_row = QtWidgets.QHBoxLayout()
@@ -425,8 +424,8 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
 
         layout.addWidget(spectrum_group, 1)
         layout.addWidget(setup_group)
-        layout.addWidget(fitting_group)
-        layout.addWidget(display_group)
+        layout.addWidget(self.fitting_group)
+        layout.addWidget(self.display_group)
 
         self._update_spectrum_count_label()
 
@@ -480,12 +479,12 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
 
     def _update_background_label(self, rec=None, path=None):
         if path:
-            self.bg_file_label.setText(f"Background file: {os.path.basename(path)}")
+            self.bg_file_label.setText(f"{os.path.basename(path)}")
             return
 
         rec = rec or self.session.active_record
         if rec is None or rec._background is None:
-            self.bg_file_label.setText("No background loaded")
+            self.bg_file_label.setText("No ref BG loaded")
             return
 
         if (
@@ -494,9 +493,9 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             and hasattr(rec._background.metadata.General, 'original_filename')
         ):
             bg_name = rec._background.metadata.General.original_filename
-            self.bg_file_label.setText(f"Background file: {os.path.basename(bg_name)}")
+            self.bg_file_label.setText(f"{os.path.basename(bg_name)}")
         else:
-            self.bg_file_label.setText("Background loaded")
+            self.bg_file_label.setText("Reference BG loaded")
         
     def on_spectrum_changed(self, idx):
         """Handle spectrum selection changes in the list."""
@@ -548,17 +547,17 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             return ""
         if rec.bg_fit_mode == 'bg_elements' and rec.has_bg_element_overlap():
             return (
-                "Fitted external BG subtraction is unavailable in BG Elements mode when "
+                "Fitted reference BG is unavailable in BG Elements mode when "
                 "background elements overlap the sample elements."
             )
         if rec.model is None:
             return (
-                "Fit a model to enable fitted external background subtraction. "
-                "Measured BG subtraction requires a loaded background spectrum."
+                "Fit a model to enable fitted reference BG. "
+                "Measured subtraction requires a loaded reference BG."
             )
         if rec.bg_fit_mode == 'bg_spec' and rec._background is None:
-            return "Load a measured background spectrum to enable BG Spec modeling and measured BG subtraction."
-        return "Peak-sum sources affect get_lines_intensity() only. Use the raw source unless you explicitly need an external-background-subtracted sum."
+            return "Load a reference BG to enable BG Spec modeling and measured subtraction."
+        return "Peak-sum sources affect get_lines_intensity() only. Use the raw source unless you explicitly need a reference-BG-subtracted sum."
 
     def _sync_background_mode_controls(self, rec=None):
         rec = rec or self.session.active_record
@@ -570,9 +569,9 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         if rec._background is not None:
             display_enabled_modes.add('measured_bg_subtracted')
             peak_enabled_modes.add('measured_bg_subtracted')
-        if rec.can_use_fitted_external_bg_subtraction():
-            display_enabled_modes.add('fitted_external_bg_subtracted')
-            peak_enabled_modes.add('fitted_external_bg_subtracted')
+        if rec.can_use_fitted_reference_bg_subtraction():
+            display_enabled_modes.add('fitted_reference_bg_subtracted')
+            peak_enabled_modes.add('fitted_reference_bg_subtracted')
 
         self._set_signal_mode_combo_state(self.display_mode_combo, rec.display_signal_mode, display_enabled_modes)
         self._set_signal_mode_combo_state(self.peak_sum_mode_combo, rec.peak_sum_signal_mode, peak_enabled_modes)
@@ -588,7 +587,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         with QtCore.QSignalBlocker(self.unit_cps_radio):
             self.unit_cps_radio.setChecked(effective_unit == "cps")
         if uses_model_plot:
-            self.signal_unit_label.setText("Signal-only unit:")
+            self.signal_unit_label.setText("Unit:")
             tooltip = (
                 "Model plots always use CPS because fitting and model diagnostics are normalized "
                 "to live time. Counts still apply to signal-only views, exports, and peak-sum intensities."
@@ -598,7 +597,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             self.residual_checkbox.setEnabled(True)
             self.residual_checkbox.setToolTip("")
         else:
-            self.signal_unit_label.setText("Signal unit:")
+            self.signal_unit_label.setText("Unit:")
             tooltip = ""
             self.unit_counts_radio.setEnabled(True)
             self.unit_cps_radio.setEnabled(True)
@@ -607,6 +606,44 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
 
         for widget in (self.signal_unit_label, self.unit_counts_radio, self.unit_cps_radio):
             widget.setToolTip(tooltip)
+
+    def _get_effective_plot_unit(self, rec=None):
+        rec = rec or self.session.active_record
+        if rec is None:
+            return "counts"
+        return "cps" if rec.uses_model_plot() else rec.signal_unit
+
+    def _get_current_plot_signal(self, rec=None):
+        rec = rec or self.session.active_record
+        if rec is None:
+            return None
+        return rec.get_signal_for_fit() if rec.uses_model_plot() else rec.signal
+
+    def _get_log_lower_bound(self, rec=None):
+        rec = rec or self.session.active_record
+        if rec is None:
+            return 1.0
+        if self._get_effective_plot_unit(rec) == "cps":
+            live_time = rec.get_live_time()
+            if live_time and live_time > 0:
+                return 1.0 / live_time
+        return 1.0
+
+    def _get_x_range_limit(self, rec=None):
+        rec = rec or self.session.active_record
+        plot_signal = self._get_current_plot_signal(rec)
+        if plot_signal is None:
+            return None
+        xaxis = plot_signal.axes_manager.signal_axes[0]
+        requested = float(self.x_range_combo.currentData())
+        return min(xaxis.high_value, requested)
+
+    def _update_fitting_group_title(self, rec=None):
+        rec = rec or self.session.active_record
+        if rec is None or rec.reduced_chisq is None:
+            self.fitting_group.setTitle("Fitting and Quantification")
+        else:
+            self.fitting_group.setTitle(f"Fitting and Quantification (χ²ᵣ: {rec.reduced_chisq:.4f})")
 
     def apply_elements(self):
         # Always update elements, even if empty
@@ -631,6 +668,8 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         if rec is None:
             return
 
+        previous_effective_unit = getattr(self, "_last_effective_plot_unit", None)
+
         fig, ax = rec.plot(
             use_model=None,  # default: use model if available
             ax=self.ax,
@@ -641,13 +680,16 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         
         self.fig = fig
         self.ax = ax 
-        self.chisq_label.setText(
-            f"Reduced chi^2: {rec.reduced_chisq:.4f}" if rec.reduced_chisq is not None else "Reduced chi^2: -"
-        )
+        self._update_fitting_group_title(rec)
         self._sync_background_mode_controls(rec)
         self._sync_display_controls(rec)
         if self.fig is None or self.ax is None:
             return
+
+        current_effective_unit = self._get_effective_plot_unit(rec)
+        self._last_effective_plot_unit = current_effective_unit
+        if previous_effective_unit is not None and previous_effective_unit != current_effective_unit:
+            self.reset_y()
 
         self.fig.canvas.manager.window.setWindowIcon(QIcon(ICON_PATH))
         plt.show(block=False)
@@ -714,8 +756,8 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             reply = QtWidgets.QMessageBox.question(
                 self, 
                 "No Background Loaded",
-                "BG Spec mode requires a background spectrum, but none is loaded.\n\n"
-                "Would you like to load a background spectrum now?",
+                "BG Spec mode requires a reference BG spectrum, but none is loaded.\n\n"
+                "Would you like to load a reference BG spectrum now?",
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
                 QtWidgets.QMessageBox.Yes
             )
@@ -744,8 +786,8 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             reply = QtWidgets.QMessageBox.question(
                 self, 
                 "No Background Loaded",
-                "One or more spectra are set to BG Spec mode, but no background is loaded.\n\n"
-                "Would you like to load a background spectrum now?",
+                "One or more spectra are set to BG Spec mode, but no reference BG is loaded.\n\n"
+                "Would you like to load a reference BG spectrum now?",
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
                 QtWidgets.QMessageBox.Yes
             )
@@ -847,11 +889,12 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
     def toggle_log_y(self):
         ax = self.ax
         fig = self.fig
+        rec = self.session.active_record
         if ax is not None:
             scale = "log" if self.log_checkbox.isChecked() else "linear"
             ax.set_yscale(scale)
             if scale == 'log':
-                ax.set_ylim(bottom=1)
+                ax.set_ylim(bottom=self._get_log_lower_bound(rec))
             if fig is not None:
                 fig.canvas.draw_idle()
 
@@ -861,21 +904,39 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
     def toggle_background(self):
         self.update_plot(force_replot=True)
 
+    def reset_y(self):
+        ax = self.ax
+        fig = self.fig
+        rec = self.session.active_record
+        if ax is None or rec is None:
+            return
+
+        x_limits = ax.get_xlim()
+        if ax.get_yscale() == 'log':
+            ax.autoscale(enable=True, axis='y', tight=True)
+            ax.set_xlim(x_limits)
+            ax.set_ylim(bottom=self._get_log_lower_bound(rec))
+        else:
+            ax.autoscale(enable=True, axis='y')
+            ax.set_xlim(x_limits)
+        if fig is not None:
+            fig.canvas.draw_idle()
+
     def reset_zoom(self):
         ax = self.ax
         fig = self.fig
         rec = self.session.active_record
         if ax is not None and rec is not None:
-            plot_signal = rec.get_signal_for_fit() if rec.uses_model_plot() else rec.signal
+            plot_signal = self._get_current_plot_signal(rec)
             xaxis = plot_signal.axes_manager.signal_axes[0]
-            ax.set_xlim(xaxis.low_value, xaxis.high_value)
-            if ax.get_yscale() == 'log':
-                ax.autoscale(enable=True, axis='y', tight=True)
-                ax.set_ylim(bottom=1)
-            else:
-                ax.autoscale(enable=True, axis='y')
+            xmax = self._get_x_range_limit(rec)
+            ax.set_xlim(xaxis.low_value, xmax if xmax is not None else xaxis.high_value)
+            self.reset_y()
             if fig is not None:
                 fig.canvas.draw_idle()
+
+    def _on_x_range_changed(self):
+        self.reset_zoom()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -1157,8 +1218,8 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             first_rec = next(iter(self.session.records.values()))
             if first_rec._background is None:
                 QtWidgets.QMessageBox.information(
-                    self, "Background Required",
-                    "BG Spec mode requires a background spectrum. Please load one using 'Open BG'."
+                    self, "Reference BG Required",
+                    "BG Spec mode requires a reference background spectrum. Please load one using 'Open Ref BG'."
                 )
                 self._on_bg_open()
                 # Check again if BG was loaded
@@ -1201,7 +1262,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         if rec is not None and hasattr(rec, "path"):
             start_dir = os.path.dirname(rec.path)
         fname, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Open Background Spectrum", start_dir, "EDS Files (*.eds)"
+            self, "Open Reference Background Spectrum", start_dir, "EDS Files (*.eds)"
         )
         if fname:
             try:
@@ -1218,11 +1279,11 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
                 self.update_plot(force_replot=True)
                 
                 QtWidgets.QMessageBox.information(
-                    self, "Background Loaded",
-                    f"Background spectrum loaded and fit mode set to 'BG Spec':\n{fname}"
+                    self, "Reference BG Loaded",
+                    f"Reference background spectrum loaded and fit mode set to 'BG Spec':\n{fname}"
                 )
             except Exception as e:
-                QtWidgets.QMessageBox.warning(self, "Background Error", str(e))
+                QtWidgets.QMessageBox.warning(self, "Reference BG Error", str(e))
 
 def main():
     from glob import glob

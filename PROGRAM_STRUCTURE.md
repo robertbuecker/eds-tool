@@ -78,7 +78,7 @@ The EDS Tool is a Python application for analyzing Energy-Dispersive X-ray Spect
 - **Session-based management**: `EDSSession` manages multiple `EDSSpectrumRecord` objects
 - **Lazy computation**: Fitted signals and intensities are cached after fitting
 - **Separated signal roles**: raw counts, a CPS-normalized fit/model signal, and a mutable display proxy are distinct
-- **Flexible background handling**: explicit external-background modes are separate from the polynomial continuum (see [Background Handling](#background-handling))
+- **Flexible background handling**: explicit reference-background modes are separate from the polynomial continuum (see [Background Handling](#background-handling))
 
 ---
 
@@ -111,13 +111,13 @@ _background_fit_signal: EDSTEMSpectrum  # Background spectrum normalized to CPS
 model: EDSTEMModel           # Fitted model on _fit_signal (None if not fitted)
 intensities: List[Signal]    # Summed intensities
 fitted_intensities: List[Signal]  # Intensities from fit
-fitted_external_clean_signal: EDSTEMSpectrum # CPS signal minus fitted external BG
-fitted_external_bg_signal: EDSTEMSpectrum    # CPS fitted external BG only
-signal_clean: EDSTEMSpectrum # Legacy alias of fitted_external_clean_signal
-signal_bg: EDSTEMSpectrum    # Legacy alias of fitted_external_bg_signal
+fitted_reference_clean_signal: EDSTEMSpectrum # CPS signal minus fitted reference BG
+fitted_reference_bg_signal: EDSTEMSpectrum    # CPS fitted reference BG only
+signal_clean: EDSTEMSpectrum # Legacy alias of fitted_reference_clean_signal
+signal_bg: EDSTEMSpectrum    # Legacy alias of fitted_reference_bg_signal
 reduced_chisq: float         # Goodness of fit
 bg_fit_mode: str             # 'bg_elements' or 'bg_spec'
-display_signal_mode: str     # 'raw', 'measured_bg_subtracted', 'fitted_external_bg_subtracted'
+display_signal_mode: str     # 'raw', 'measured_bg_subtracted', 'fitted_reference_bg_subtracted'
 peak_sum_signal_mode: str    # Same choices, but for get_lines_intensity()
 bg_correction_mode: str      # Legacy summary of the explicit signal modes
 signal_unit: str             # 'counts' or 'cps' for signal-only views/export
@@ -176,7 +176,7 @@ active_record: EDSSpectrumRecord       # Currently selected spectrum
 - Initial navigator/plot window sizing is screen-aware rather than fixed, so the control pane can use more vertical space without breaking the side-by-side plot arrangement
 - Initial plot-window creation is deferred until the navigator's first real `showEvent`; doing it inside `__init__` caused unstable first-pass Qt layout in nested control groups
 - Raw/model HyperSpy plots now use the CPS-normalized fit signal; counts remain a signal-only view/export choice
-- The fitted-external-background-subtracted spectrum view still uses a live HyperSpy model plot by swapping the signal/model line callbacks to a background-subtracted space; the residual is unchanged because subtracting the same fitted background from both signal and model cancels out
+- The fitted-reference-BG-subtracted spectrum view still uses a live HyperSpy model plot by swapping the signal/model line callbacks to a background-subtracted space; the residual is unchanged because subtracting the same fitted reference BG from both signal and model cancels out
 
 ---
 
@@ -366,7 +366,7 @@ Each can be:
 
 - `'raw'`
 - `'measured_bg_subtracted'`
-- `'fitted_external_bg_subtracted'`
+- `'fitted_reference_bg_subtracted'`
 
 These control signal-only views/export and peak-sum intensities. They do not change the CPS-normalized fit/model signal.
 
@@ -381,12 +381,12 @@ These control signal-only views/export and peak-sum intensities. They do not cha
 - Subtracts the measured background with live-time normalization
 - Affects signal-only views/export and peak summation only
 
-#### `'subtract_fitted'` — Fitted External Background Subtraction
-- Maps to `display_signal_mode = peak_sum_signal_mode = 'fitted_external_bg_subtracted'`
-- Subtracts only explicitly modeled external-background components
+#### `'subtract_fitted'` — Fitted Reference Background Subtraction
+- Maps to `display_signal_mode = peak_sum_signal_mode = 'fitted_reference_bg_subtracted'`
+- Subtracts only explicitly modeled reference-background components
 - Available for `bg_spec`
 - Also available for `bg_elements` only when BG elements are disjoint from sample elements
-- Raises `ValueError` when no identifiable fitted external background exists
+- Raises `ValueError` when no identifiable fitted reference background exists
 
 ### Two Fitting Modes (`bg_fit_mode`)
 

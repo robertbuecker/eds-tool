@@ -198,7 +198,7 @@ All tests completed!
 - ✅ bg_elements mode: fit runs on a CPS signal and overlapping BG elements do not expose fitted subtraction
 - ✅ bg_spec mode: 21 components (sample + polynomial + instrument)
 - ✅ bg_spec mode keeps `instrument.xscale` and `instrument.shift` fixed in the initial fit
-- ✅ Explicit signal modes (`raw`, `measured_bg_subtracted`, `fitted_external_bg_subtracted`) work when available
+- ✅ Explicit signal modes (`raw`, `measured_bg_subtracted`, `fitted_reference_bg_subtracted`) work when available
 - ✅ Invalid fitted subtraction raises instead of silently falling back
 
 **When to Run**:
@@ -223,7 +223,7 @@ All tests completed!
 4. Background spectrum loading for all
 5. BG fit mode propagation
 6. Stable background mode / unit propagation
-7. Fitted subtraction availability only when the external background is identifiable
+7. Fitted subtraction availability only when the reference background is identifiable
 8. Peak-sum intensity computation with different source modes
 
 **Expected Output**:
