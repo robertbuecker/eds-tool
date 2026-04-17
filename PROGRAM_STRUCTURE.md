@@ -77,7 +77,8 @@ The EDS Tool is a Python application for analyzing Energy-Dispersive X-ray Spect
 - **No business logic in GUI**: All fitting, calibration, and export logic lives in `eds_session.py`
 - **Session-based management**: `EDSSession` manages multiple `EDSSpectrumRecord` objects
 - **Lazy computation**: Fitted signals and intensities are cached after fitting
-- **Flexible background handling**: Three correction modes, two fitting modes (see [Background Handling](#background-handling))
+- **Separated signal roles**: raw counts, a CPS-normalized fit/model signal, and a mutable display proxy are distinct
+- **Flexible background handling**: explicit external-background modes are separate from the polynomial continuum (see [Background Handling](#background-handling))
 
 ---
 
@@ -102,17 +103,24 @@ Represents a single EDS spectrum with its model, intensities, and metadata.
 **Key Attributes**:
 ```python
 path: str                    # File path
-signal: EDSTEMSpectrum       # Current signal (may have bg correction applied)
-_signal: EDSTEMSpectrum      # Original signal (always in counts)
-_background: EDSTEMSpectrum  # Background spectrum (if loaded)
-model: EDSTEMModel           # Fitted model (None if not fitted)
+signal: EDSTEMSpectrum       # Mutable display proxy for signal-only views/export
+_signal: EDSTEMSpectrum      # Raw source signal (always in counts)
+_fit_signal: EDSTEMSpectrum  # Raw source normalized to CPS for fit/model diagnostics
+_background: EDSTEMSpectrum  # Background spectrum in counts (if loaded)
+_background_fit_signal: EDSTEMSpectrum  # Background spectrum normalized to CPS
+model: EDSTEMModel           # Fitted model on _fit_signal (None if not fitted)
 intensities: List[Signal]    # Summed intensities
 fitted_intensities: List[Signal]  # Intensities from fit
-signal_clean: EDSTEMSpectrum # Signal minus background (cached)
-signal_bg: EDSTEMSpectrum    # Background component only (cached)
+fitted_external_clean_signal: EDSTEMSpectrum # CPS signal minus fitted external BG
+fitted_external_bg_signal: EDSTEMSpectrum    # CPS fitted external BG only
+signal_clean: EDSTEMSpectrum # Legacy alias of fitted_external_clean_signal
+signal_bg: EDSTEMSpectrum    # Legacy alias of fitted_external_bg_signal
 reduced_chisq: float         # Goodness of fit
 bg_fit_mode: str             # 'bg_elements' or 'bg_spec'
-bg_correction_mode: str      # 'none', 'subtract_fitted', 'subtract_spectra'
+display_signal_mode: str     # 'raw', 'measured_bg_subtracted', 'fitted_external_bg_subtracted'
+peak_sum_signal_mode: str    # Same choices, but for get_lines_intensity()
+bg_correction_mode: str      # Legacy summary of the explicit signal modes
+signal_unit: str             # 'counts' or 'cps' for signal-only views/export
 ```
 
 **Key Methods**:
@@ -160,6 +168,15 @@ active_record: EDSSpectrumRecord       # Currently selected spectrum
 - GUI code calls `EDSSession` / `EDSSpectrumRecord` methods
 - No fitting or computation logic in GUI layer
 - Use Qt signals for asynchronous updates (if needed)
+- `NavigatorWidget` is organized into functional groups: spectrum management, elements/background, fitting/quantification, and display/tables
+- Background UI is split into a simple primary path (`Fit background`) plus derived-signal controls in two places:
+  - `Spectrum view` lives in `Display and Tables`
+  - `Peak-sum source` lives in an `Advanced` section inside `Fitting and Quantification`
+- The spectrum list is the primary stretch area because the common workflow is many loaded spectra with one active record
+- Initial navigator/plot window sizing is screen-aware rather than fixed, so the control pane can use more vertical space without breaking the side-by-side plot arrangement
+- Initial plot-window creation is deferred until the navigator's first real `showEvent`; doing it inside `__init__` caused unstable first-pass Qt layout in nested control groups
+- Raw/model HyperSpy plots now use the CPS-normalized fit signal; counts remain a signal-only view/export choice
+- The fitted-external-background-subtracted spectrum view still uses a live HyperSpy model plot by swapping the signal/model line callbacks to a background-subtracted space; the residual is unchanged because subtracting the same fitted background from both signal and model cancels out
 
 ---
 
@@ -177,10 +194,11 @@ active_record: EDSSpectrumRecord       # Currently selected spectrum
    - If model exists → automatic refit triggered
    
 3. Fit Model → Model created and fitted
+   - Fit/model diagnostics operate on `_fit_signal` in CPS
    - Model type depends on bg_fit_mode
    - Intensities computed from fit
    - Chi-square calculated
-   - Fitted signals cached (signal_clean, signal_bg)
+   - External-background-only fitted signals cached
 
 4. Fine-Tune → Energy calibration applied
    - Offset calibration
@@ -221,9 +239,9 @@ active_record: EDSSpectrumRecord       # Currently selected spectrum
 The fitting process uses HyperSpy/exspy's `EDSTEMModel`:
 
 ```python
-# Create model
-self.signal.set_elements(elements)
-self.model = self.signal.create_model(
+# Create model on the CPS-normalized fit signal
+self._fit_signal.set_elements(elements)
+self.model = self._fit_signal.create_model(
     auto_add_lines=True,      # Add X-ray lines automatically
     auto_background=True       # Add polynomial background
 )
@@ -236,13 +254,13 @@ self.model.add_family_lines()  # Add all lines for each element family
 **Use case**: No background spectrum available, but know instrument elements
 
 ```python
-# Add background elements to model temporarily
+# Add background elements to the CPS fit signal temporarily
 all_elements = sample_elements + bg_elements
-self.signal.set_elements(all_elements)
-self.model = self.signal.create_model(...)
+self._fit_signal.set_elements(all_elements)
+self.model = self._fit_signal.create_model(...)
 self.model.fit()
 # Restore sample elements only
-self.signal.set_elements(sample_elements)
+self._fit_signal.set_elements(sample_elements)
 ```
 
 **Model components**:
@@ -254,12 +272,12 @@ self.signal.set_elements(sample_elements)
 **Use case**: Have measured background spectrum (recommended for accuracy)
 
 ```python
-# Create model with sample elements only
-self.signal.set_elements(sample_elements)
-self.model = self.signal.create_model(...)
+# Create model with sample elements only on the CPS fit signal
+self._fit_signal.set_elements(sample_elements)
+self.model = self._fit_signal.create_model(...)
 
 # Add background spectrum as ScalableFixedPattern
-comp_bg = hs.model.components1D.ScalableFixedPattern(background_signal)
+comp_bg = hs.model.components1D.ScalableFixedPattern(background_fit_signal)
 comp_bg.name = 'instrument'
 self.model.append(comp_bg)
 
@@ -328,30 +346,60 @@ Total              | ~18 params | ~18   | *shift can be freed during fine-tuning
 
 ## Background Handling
 
-### Three Correction Modes (`bg_correction_mode`)
+### External Background vs Polynomial Continuum
 
-#### `'none'` — No Correction
-- Use raw spectrum data
-- Fastest, simplest
-- Use when background is negligible
+Two different "backgrounds" coexist in the model:
 
-#### `'subtract_spectra'` — Subtract Measured Background
-- Subtract background spectrum from signal before fitting/intensity calculation
-- Accounts for different live times automatically
-- Applied in `set_unit_and_bg()` method
-- Updates `self.signal` to be `_signal - scaled_background`
+- **External/parasitic background**: holder, grid, instrument, or blank-spectrum contributions modeled by `bg_spec` or `bg_elements`
+- **Polynomial continuum**: HyperSpy's smooth baseline terms from `auto_background=True`
 
-#### `'subtract_fitted'` — Subtract Fitted Background Component
-- Subtract 'instrument' component after fitting
-- Only works with `bg_fit_mode='bg_spec'`
-- Used for intensity computation: `signal - model.as_signal(component_list=['instrument'])`
-- Requires fitted model
+Only the first category is treated as user-facing background subtraction. The polynomial continuum remains part of the fit model and is not exposed as a subtraction mode.
+
+### Explicit Signal Source Modes
+
+`EDSSpectrumRecord` now has two explicit selectors:
+
+- `display_signal_mode`
+- `peak_sum_signal_mode`
+
+Each can be:
+
+- `'raw'`
+- `'measured_bg_subtracted'`
+- `'fitted_external_bg_subtracted'`
+
+These control signal-only views/export and peak-sum intensities. They do not change the CPS-normalized fit/model signal.
+
+### Legacy Compatibility Modes (`bg_correction_mode`)
+
+#### `'none'` — No External Background Subtraction
+- Maps to `display_signal_mode = peak_sum_signal_mode = 'raw'`
+- Keeps the raw signal for signal-only views/export and peak summation
+
+#### `'subtract_spectra'` — Measured External Background Subtraction
+- Maps to `display_signal_mode = peak_sum_signal_mode = 'measured_bg_subtracted'`
+- Subtracts the measured background with live-time normalization
+- Affects signal-only views/export and peak summation only
+
+#### `'subtract_fitted'` — Fitted External Background Subtraction
+- Maps to `display_signal_mode = peak_sum_signal_mode = 'fitted_external_bg_subtracted'`
+- Subtracts only explicitly modeled external-background components
+- Available for `bg_spec`
+- Also available for `bg_elements` only when BG elements are disjoint from sample elements
+- Raises `ValueError` when no identifiable fitted external background exists
 
 ### Two Fitting Modes (`bg_fit_mode`)
 
 See [Fitting Approach](#fitting-approach) section above.
 
-**Recommendation**: Use `bg_fit_mode='bg_spec'` with `bg_correction_mode='none'` for most accurate results.
+### CPS-First Model Path
+
+- Fitting and model diagnostics always run on `_fit_signal`, which is `_signal` normalized to CPS
+- `bg_spec` uses `_background_fit_signal`, the measured background normalized to CPS
+- Raw/model HyperSpy plots therefore operate in CPS
+- Counts remain available for signal-only views, export, and peak-sum intensities
+
+**Recommendation**: Use `bg_fit_mode='bg_spec'` with raw CPS model diagnostics, and apply measured or fitted external subtraction only where a derived signal is actually needed.
 
 ---
 

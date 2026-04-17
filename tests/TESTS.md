@@ -2,7 +2,7 @@
 
 This directory contains the essential tests for the EDS Tool. These tests verify core functionality, performance, and correct behavior after code changes.
 
-**Last Updated**: 2026-04-15  
+**Last Updated**: 2026-04-16  
 **Total Tests**: 8 (7 automated + 1 manual GUI test)
 
 ---
@@ -13,18 +13,18 @@ Run all automated tests from the project root:
 
 ```bash
 # Core functionality tests
-conda run -n eds-mini python tests\test_default_resolution.py
-conda run -n eds-mini python tests\test_bg_handling.py
-conda run -n eds-mini python tests\test_session_bg_handling.py
-conda run -n eds-mini python tests\test_refit_on_element_change.py
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_default_resolution.py
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_bg_handling.py
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_session_bg_handling.py
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_refit_on_element_change.py
 
 # Performance & behavior tests
-conda run -n eds-mini python tests\test_fine_tune_timing.py
-conda run -n eds-mini python tests\test_calibrate_includes_fit.py
-conda run -n eds-mini python tests\test_param_locking.py
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_fine_tune_timing.py
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_calibrate_includes_fit.py
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_param_locking.py
 
 # Manual GUI test (requires interaction)
-conda run -n eds-mini python tests\test_fine_tune_gui.py
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_fine_tune_gui.py
 ```
 
 ---
@@ -48,39 +48,39 @@ conda run -n eds-mini python tests\test_fine_tune_gui.py
 === Test: Fine-tune Timing ===
 Initial fit...
   Initial fit took: ~3s
-  Initial χ²ᵣ: 790.78
+  Initial χ²ᵣ: ~0.27
 
 Fine-tuning...
 === Fine-tuning grain1_thin ===
-Initial χ²ᵣ: 790.78
+Initial χ²ᵣ: ~0.27
 Initial offset: -0.002152 keV
 Initial resolution: 128.00 eV
 Initial BG shift: 0.000000 keV
 
 After offset calibration:
   Offset: 0.002169 keV (Δ = 4.32 eV)
-  χ²ᵣ: 622.01 (Δ = -168.77, -21.3%)
+  χ²ᵣ: ~0.21 (Δ ≈ -21%)
 
 After background shift refinement:
   BG shift: 0.002733 keV (Δ = 2.73 eV)
-  χ²ᵣ: 614.50
+  χ²ᵣ: ~0.21
 
 After resolution calibration (with locked parameters):
   Resolution: 127.21 eV (Δ = -0.79 eV)
-  χ²ᵣ: 560.55 (Δ = -53.95, -8.8%)
+  χ²ᵣ: ~0.19 (Δ ≈ -9%)
 
 After final refinement fit:
-  χ²ᵣ: 582.96 (Δ = 22.41, 4.0%)
+  χ²ᵣ: ~0.20
 
 --- Summary ---
 Total offset change: +4.32 eV
 Total resolution change: -0.79 eV
 Total BG shift change: +2.73 eV
-χ²ᵣ: 790.78 → 582.96 (+26.3%)
+χ²ᵣ: ~0.27 → ~0.20 (+26.3%)
 
   Fine-tune took: ~3s
-  After fine-tuning χ²ᵣ: 582.96
-  Improvement: 91.2%
+  After fine-tuning χ²ᵣ: ~0.20
+  Improvement: chi-square should still improve substantially; absolute values changed after moving the fit/model path to CPS
 
 ✓ Fine-tuning time is reasonable (~1.0x initial fit time)
 ```
@@ -89,6 +89,7 @@ Total BG shift change: +2.73 eV
 - ✅ Fine-tuning time ≤ 3x initial fit time (ideally ~1.0x)
 - ✅ No maxfev warnings
 - ✅ Chi-square improves by ~20-30%
+- ✅ Absolute χ²ᵣ values may differ from older counts-based runs because the fit/model path is now CPS-normalized
 - ✅ Offset change typically 3-5 eV
 - ✅ Resolution change typically 1-5 eV
 
@@ -153,10 +154,10 @@ Background energy resolution: 128 eV
 
 **What it tests**:
 1. Basic loading and element setting
-2. `bg_elements` mode (adding background elements to model)
-3. `bg_spec` mode (ScalableFixedPattern with background spectrum)
-4. Three background correction modes: 'none', 'subtract_fitted', 'subtract_spectra'
-5. Fallback behavior when conditions not met
+2. `bg_elements` mode on the CPS-normalized fit signal
+3. `bg_spec` mode (ScalableFixedPattern with CPS-normalized background spectrum)
+4. Explicit display / peak-sum source modes
+5. Rejection of invalid fitted-background subtraction
 
 **Expected Output**:
 ```
@@ -194,15 +195,15 @@ All tests completed!
 ```
 
 **Success Criteria**:
-- ✅ bg_elements mode: 79 components (sample + bg elements + polynomial)
+- ✅ bg_elements mode: fit runs on a CPS signal and overlapping BG elements do not expose fitted subtraction
 - ✅ bg_spec mode: 21 components (sample + polynomial + instrument)
 - ✅ bg_spec mode keeps `instrument.xscale` and `instrument.shift` fixed in the initial fit
-- ✅ All 3 correction modes work
-- ✅ Fallback to 'none' when conditions not met
+- ✅ Explicit signal modes (`raw`, `measured_bg_subtracted`, `fitted_external_bg_subtracted`) work when available
+- ✅ Invalid fitted subtraction raises instead of silently falling back
 
 **When to Run**:
 - After changes to background handling logic
-- After changes to `fit_model()` or `set_bg_correction_mode()`
+- After changes to `fit_model()`, explicit signal-mode handling, or legacy `set_bg_correction_mode()`
 - Before releases
 
 **Files Used**:
@@ -221,9 +222,9 @@ All tests completed!
 3. BG elements propagation
 4. Background spectrum loading for all
 5. BG fit mode propagation
-6. BG correction mode propagation
-7. Fit all with bg_spec mode
-8. Intensity computation with different modes
+6. Stable background mode / unit propagation
+7. Fitted subtraction availability only when the external background is identifiable
+8. Peak-sum intensity computation with different source modes
 
 **Expected Output**:
 ```
@@ -250,8 +251,9 @@ All tests PASSED! ✓
 - ✅ All spectra get same elements
 - ✅ All spectra get same bg_elements
 - ✅ All spectra get same background spectrum
-- ✅ Mode changes propagate to all spectra
-- ✅ Intensities computed correctly in all modes
+- ✅ Stable signal modes and units propagate to all spectra
+- ✅ `subtract_fitted` is rejected for overlapping `bg_elements` fits
+- ✅ Peak-sum intensities respond to the selected derived source
 
 **When to Run**:
 - After changes to `EDSSession` methods
@@ -434,7 +436,7 @@ After resolution calibration (before fit):
 **Type**: Manual (requires user interaction)
 
 **Instructions**:
-1. Run the script: `conda run -n eds-mini python tests\test_fine_tune_gui.py`
+1. Run the script: `powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_fine_tune_gui.py`
 2. GUI window opens with loaded spectrum
 3. Click "Fit (sel)" button to fit the model
 4. Observe initial chi-square value

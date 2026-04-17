@@ -39,13 +39,20 @@ class EDSSpectrumRecord:
         self._signal = hs.load(path)
         self._signal.metadata.set_item('General.title', os.path.splitext(os.path.basename(path))[0])
         self._signal.metadata.set_item('General.original_filename', path)
+        self._signal.metadata.set_item('Signal.quantity', 'X-rays (Counts)')
         
         # Set default energy resolution to 128 eV (instead of HyperSpy's default of 133 eV)
         self._signal.set_microscope_parameters(energy_resolution_MnKa=128)
         
         self._background: Optional[exspy.signals.EDSTEMSpectrum] = None
+        self._background_fit_signal: Optional[exspy.signals.EDSTEMSpectrum] = None
         self._bg_correction_active = False
-        self.signal = self._signal  # This will be updated by set_bg_correction
+        self.signal_unit: str = 'counts'
+        self.display_signal_mode: str = 'raw'
+        self.peak_sum_signal_mode: str = 'raw'
+        self.bg_correction_mode: str = 'none'  # Legacy compatibility summary
+        self._fit_signal = self._signal.deepcopy()
+        self.signal = self._signal.deepcopy()
         self.model: Optional[exspy.models.EDSTEMModel] = None
         self.intensities: Optional[List[hs.BaseSignal]] = None
         self.fitted_intensities: Optional[List[hs.BaseSignal]] = None
@@ -53,20 +60,232 @@ class EDSSpectrumRecord:
         # New background handling attributes
         self.bg_elements: List[str] = []  # Elements from BG (instrument, holder, etc.)
         self.bg_fit_mode: str = 'bg_spec'  # 'bg_elements' or 'bg_spec'
-        self.bg_correction_mode: str = 'none'  # 'none', 'subtract_fitted', 'subtract_spectra'
         
         # Fitted signals (computed after fitting for efficiency)
-        self.signal_clean: Optional[exspy.signals.EDSTEMSpectrum] = None  # Signal minus background
-        self.signal_bg: Optional[exspy.signals.EDSTEMSpectrum] = None  # Background only
+        self.fitted_external_clean_signal: Optional[exspy.signals.EDSTEMSpectrum] = None
+        self.fitted_external_bg_signal: Optional[exspy.signals.EDSTEMSpectrum] = None
+        self.signal_clean: Optional[exspy.signals.EDSTEMSpectrum] = None  # Legacy alias
+        self.signal_bg: Optional[exspy.signals.EDSTEMSpectrum] = None  # Legacy alias
         self.reduced_chisq: Optional[float] = None  # Reduced chi-square from fit
+        self._sync_fit_signal_from_raw()
+        self._refresh_display_signal_cache()
 
     @property
     def name(self) -> str:
-        return self.signal.metadata.get_item('General.title', default=os.path.basename(self.path))
+        return self._signal.metadata.get_item('General.title', default=os.path.basename(self.path))
 
     @property
     def elements(self) -> List[str]:
-        return self.signal.metadata.get_item('Sample.elements', default=[])
+        return self._signal.metadata.get_item('Sample.elements', default=[])
+
+    def _sync_legacy_bg_correction_mode(self):
+        if self.display_signal_mode == self.peak_sum_signal_mode:
+            mapping = {
+                'raw': 'none',
+                'measured_bg_subtracted': 'subtract_spectra',
+                'fitted_external_bg_subtracted': 'subtract_fitted',
+            }
+            self.bg_correction_mode = mapping[self.display_signal_mode]
+        else:
+            self.bg_correction_mode = 'mixed'
+        self._bg_correction_active = self.display_signal_mode != 'raw' or self.peak_sum_signal_mode != 'raw'
+
+    def _format_quantity(self, unit: str, mode: str) -> str:
+        suffix_map = {
+            'raw': '',
+            'measured_bg_subtracted': ', Measured BG Subtracted',
+            'fitted_external_bg_subtracted': ', Fitted External BG Subtracted',
+        }
+        return f"X-rays ({unit.capitalize()}{suffix_map[mode]})"
+
+    def _get_live_time_or_raise(self, signal) -> float:
+        live_time = self.get_live_time(signal)
+        if live_time is None or live_time == 0:
+            raise ValueError(f"Live time missing or zero for spectrum '{self.name}'")
+        return live_time
+
+    def _copy_calibration(self, source_signal, target_signal):
+        source_axis = source_signal.axes_manager.signal_axes[0]
+        target_axis = target_signal.axes_manager.signal_axes[0]
+        target_axis.offset = source_axis.offset
+        target_axis.scale = source_axis.scale
+        source_resolution = source_signal.metadata.get_item(
+            'Acquisition_instrument.TEM.Detector.EDS.energy_resolution_MnKa',
+            default=None,
+        )
+        if source_resolution is not None:
+            target_signal.set_microscope_parameters(energy_resolution_MnKa=source_resolution)
+
+    def _sync_signal_proxy(self, target_signal, source_signal):
+        self._copy_calibration(source_signal, target_signal)
+        target_signal.data = source_signal.data.copy()
+        target_signal.metadata.set_item(
+            'Signal.quantity',
+            source_signal.metadata.get_item('Signal.quantity', default='X-rays (Counts)'),
+        )
+        target_signal.metadata.set_item(
+            'Sample.elements',
+            list(source_signal.metadata.get_item('Sample.elements', default=[])),
+        )
+
+    def _make_cps_signal(self, source_signal):
+        cps_signal = source_signal.deepcopy()
+        live_time = self._get_live_time_or_raise(source_signal)
+        cps_signal.data = source_signal.data / live_time
+        cps_signal.metadata.set_item('Signal.quantity', 'X-rays (CPS)')
+        return cps_signal
+
+    def _sync_fit_signal_from_raw(self):
+        fit_signal = self._make_cps_signal(self._signal)
+        self._sync_signal_proxy(self._fit_signal, fit_signal)
+
+    def _sync_raw_signal_from_fit(self):
+        self._copy_calibration(self._fit_signal, self._signal)
+        if self.signal is not None:
+            self._copy_calibration(self._fit_signal, self.signal)
+
+    def _make_signal_from_counts(self, counts_data, unit: str, mode: str):
+        live_time = self._get_live_time_or_raise(self._signal)
+        signal = self._signal.deepcopy()
+        signal.data = counts_data if unit == 'counts' else counts_data / live_time
+        signal.metadata.set_item('Signal.quantity', self._format_quantity(unit, mode))
+        return signal
+
+    def _make_signal_from_cps(self, cps_data, unit: str, mode: str):
+        live_time = self._get_live_time_or_raise(self._signal)
+        signal = self._fit_signal.deepcopy()
+        signal.data = cps_data if unit == 'cps' else cps_data * live_time
+        signal.metadata.set_item('Signal.quantity', self._format_quantity(unit, mode))
+        return signal
+
+    def _get_measured_bg_counts(self):
+        if self._background is None:
+            raise ValueError(f"Measured background subtraction requires a background spectrum for {self.name}")
+
+        live_time_sig = self._get_live_time_or_raise(self._signal)
+        live_time_bg = self._get_live_time_or_raise(self._background)
+        scale = live_time_sig / live_time_bg
+        return self._signal.data - (self._background.data * scale)
+
+    def has_bg_element_overlap(self) -> bool:
+        return bool(set(self.elements) & set(self.bg_elements))
+
+    def can_use_fitted_external_bg_subtraction(self) -> bool:
+        if self.model is None or self.fitted_external_bg_signal is None:
+            return False
+        if self.bg_fit_mode == 'bg_spec':
+            return True
+        if self.bg_fit_mode == 'bg_elements':
+            return not self.has_bg_element_overlap()
+        return False
+
+    def _validate_signal_mode(self, mode: str):
+        valid_modes = ('raw', 'measured_bg_subtracted', 'fitted_external_bg_subtracted')
+        if mode not in valid_modes:
+            raise ValueError(f"mode must be one of {valid_modes}")
+        if mode == 'measured_bg_subtracted' and self._background is None:
+            raise ValueError(f"Measured background subtraction requires a loaded background spectrum for {self.name}")
+        if mode == 'fitted_external_bg_subtracted' and not self.can_use_fitted_external_bg_subtraction():
+            if self.bg_fit_mode == 'bg_elements' and self.has_bg_element_overlap():
+                raise ValueError(
+                    f"Fitted external background subtraction is unavailable for {self.name}: "
+                    "background elements overlap sample elements."
+                )
+            raise ValueError(f"Fitted external background subtraction is unavailable for {self.name}")
+
+    def _normalize_signal_modes(self):
+        for attr in ('display_signal_mode', 'peak_sum_signal_mode'):
+            mode = getattr(self, attr)
+            try:
+                self._validate_signal_mode(mode)
+            except ValueError:
+                setattr(self, attr, 'raw')
+        self._sync_legacy_bg_correction_mode()
+
+    def _refresh_display_signal_cache(self):
+        self._normalize_signal_modes()
+        display_signal = self.get_signal_for_display()
+        self._sync_signal_proxy(self.signal, display_signal)
+
+    def set_display_signal_mode(self, mode: str):
+        self._validate_signal_mode(mode)
+        self.display_signal_mode = mode
+        self._sync_legacy_bg_correction_mode()
+        display_signal = self.get_signal_for_display()
+        self._sync_signal_proxy(self.signal, display_signal)
+
+    def set_peak_sum_signal_mode(self, mode: str):
+        self._validate_signal_mode(mode)
+        self.peak_sum_signal_mode = mode
+        self._sync_legacy_bg_correction_mode()
+
+    def get_signal_for_fit(self):
+        return self._fit_signal
+
+    def _get_signal_for_mode(self, mode: str, unit: Optional[str] = None):
+        unit = unit or self.signal_unit
+        if unit not in ('counts', 'cps'):
+            raise ValueError("unit must be 'counts' or 'cps'")
+
+        if mode == 'raw':
+            return self._make_signal_from_counts(self._signal.data, unit, mode)
+        if mode == 'measured_bg_subtracted':
+            return self._make_signal_from_counts(self._get_measured_bg_counts(), unit, mode)
+        if mode == 'fitted_external_bg_subtracted':
+            self._validate_signal_mode(mode)
+            return self._make_signal_from_cps(self.fitted_external_clean_signal.data, unit, mode)
+        raise ValueError(f"Unknown signal mode: {mode}")
+
+    def get_signal_for_display(self, unit: Optional[str] = None):
+        return self._get_signal_for_mode(self.display_signal_mode, unit=unit)
+
+    def get_signal_for_export(self, unit: Optional[str] = None):
+        return self.get_signal_for_display(unit=unit)
+
+    def get_signal_for_peak_sum(self, unit: Optional[str] = None):
+        return self._get_signal_for_mode(self.peak_sum_signal_mode, unit=unit)
+
+    def uses_model_plot(self) -> bool:
+        return self.model is not None and self.display_signal_mode in ('raw', 'fitted_external_bg_subtracted')
+
+    def _get_fitted_bg_data_for_plot(self):
+        if self.signal_bg is None:
+            return None
+        return self.signal_bg._get_current_data()
+
+    def _signal_minus_fitted_bg_for_plot(self, **kwargs):
+        bg_data = self._get_fitted_bg_data_for_plot()
+        if bg_data is None:
+            return self._fit_signal._get_current_data()
+        return self._fit_signal._get_current_data() - bg_data
+
+    def _model_minus_fitted_bg_for_plot(self, axes_manager, out_of_range2nans=True):
+        model_data = self.model._model2plot(axes_manager, out_of_range2nans=out_of_range2nans)
+        bg_data = self._get_fitted_bg_data_for_plot()
+        if bg_data is None:
+            return model_data
+        return model_data - bg_data
+
+    def _apply_fitted_bg_subtracted_plot_callbacks(self):
+        if self.model is None or self._fit_signal._plot is None:
+            return
+
+        signal_plot = self._fit_signal._plot.signal_plot
+        if not signal_plot.ax_lines:
+            return
+
+        signal_line = signal_plot.ax_lines[0]
+        signal_line.data_function = self._signal_minus_fitted_bg_for_plot
+        signal_line.update(render_figure=False, update_ylimits=False)
+
+        if self.model._model_line is not None:
+            self.model._model_line.data_function = self._model_minus_fitted_bg_for_plot
+            self.model._model_line.update(render_figure=False, update_ylimits=False)
+
+        if self.model._residual_line is not None:
+            self.model._residual_line.update(render_figure=False, update_ylimits=False)
+
+        signal_plot.figure.canvas.draw_idle()
     
     def export(self, folder: Optional[str] = None, formats: list | str | tuple = ('csv', 'mas')):
         if isinstance(formats, str):
@@ -74,19 +293,20 @@ class EDSSpectrumRecord:
             
         folder = folder if folder is not None else os.path.dirname(self.path)
         os.makedirs(folder, exist_ok=True)
-            
+        export_signal = self.get_signal_for_export()
+             
         for fmt in formats:
             if fmt.lower() == 'csv':
                 import pandas as pd
-                energy = self.signal.axes_manager['Energy'].axis.round(6)
-                signal = self.signal.data
-                spec_data = pd.DataFrame(signal, index=energy, columns=[self.signal.metadata.get_item('Signal.quantity')])
+                energy = export_signal.axes_manager['Energy'].axis.round(6)
+                signal = export_signal.data
+                spec_data = pd.DataFrame(signal, index=energy, columns=[export_signal.metadata.get_item('Signal.quantity')])
                 spec_data.index.name = 'Energy'
                 spec_data.to_csv(os.path.join(folder, f"{self.name}.csv"))
             else:
                 target = os.path.join(folder, f"{self.name}.{fmt}")                
                 if os.path.exists(target): os.remove(target)
-                self.signal.save(target)
+                export_signal.save(target)
 
     def export_intensities_csv(self, folder: Optional[str] = None):
         """Export computed intensities to a CSV file in the same folder as the spectrum."""
@@ -130,19 +350,17 @@ class EDSSpectrumRecord:
         sys.stderr = io.StringIO()
         
         try:
-            # Plot using hyperspy's built-in method which adds X-ray lines
-            if self.elements:
-                self.signal.plot(xray_lines=True, navigator=None)
-            else:
-                self.signal.plot(xray_lines=False, navigator=None)
+            export_signal = self.get_signal_for_export()
+            export_signal.set_elements(self.get_all_elements_for_display())
+            export_signal.plot(xray_lines=bool(self.elements), navigator=None)
             
             # Get the figure that was just created
-            fig = self.signal._plot.signal_plot.figure
-            ax = self.signal._plot.signal_plot.ax
+            fig = export_signal._plot.signal_plot.figure
+            ax = export_signal._plot.signal_plot.ax
             
             # Set x-axis range if max_energy is specified
             if max_energy is not None:
-                energy = self.signal.axes_manager['Energy'].axis
+                energy = export_signal.axes_manager['Energy'].axis
                 ax.set_xlim(left=energy[0], right=max_energy)
             
             # Save in all requested formats
@@ -159,8 +377,10 @@ class EDSSpectrumRecord:
     def set_elements(self, elements: List[str]):
         if elements != self.elements:
             had_model = self.model is not None
-            self.signal.set_elements(elements)
+            self._signal.set_elements(elements)
+            self._fit_signal.set_elements(elements)
             self.intensities = None
+            self._refresh_display_signal_cache()
             
             # If a model existed, refit it with new elements instead of just deleting
             if had_model:
@@ -173,26 +393,10 @@ class EDSSpectrumRecord:
     def compute_intensities(self):
         """
         Compute intensities using peak summation.
-        Takes bg_correction_mode into account:
-        - 'none': Use raw signal
-        - 'subtract_fitted': Use spec_clean (signal minus fitted instrument component)
-        - 'subtract_spectra': Use signal with subtracted background spectrum
+        Uses the explicitly selected peak-sum signal source.
         """
         try:
-            # Determine which signal to use for intensity computation
-            if self.bg_correction_mode == 'subtract_fitted':
-                # Need fitted model with 'instrument' component
-                if self.model is None or not any(c.name == 'instrument' for c in self.model):
-                    print(f"Warning: subtract_fitted mode requires fitted model with 'instrument' component. "
-                          f"Falling back to no correction for {self.name}")
-                    signal_to_use = self.signal
-                else:
-                    # Create clean spectrum: signal - instrument component
-                    signal_to_use = self.signal - self.model.as_signal(component_list=['instrument'])
-            else:
-                # Use the current signal (already has bg_correction applied via set_unit_and_bg if needed)
-                signal_to_use = self.signal
-            
+            signal_to_use = self.get_signal_for_peak_sum()
             self.intensities = signal_to_use.get_lines_intensity()
         except Exception as e:
             print(f"Warning: Could not compute intensities for {self.name}: {e}")
@@ -206,12 +410,13 @@ class EDSSpectrumRecord:
         """
         try:
             original_elements = self.elements.copy()
+            fit_signal = self.get_signal_for_fit()
             
             if self.bg_fit_mode == 'bg_elements':
                 # Mode 1: Add BG elements to the model
                 all_elements = original_elements + self.bg_elements
-                self.signal.set_elements(all_elements)
-                self.model = self.signal.create_model(auto_add_lines=True, auto_background=True)
+                fit_signal.set_elements(all_elements)
+                self.model = fit_signal.create_model(auto_add_lines=True, auto_background=True)
                 self.model.add_family_lines()
                 
             elif self.bg_fit_mode == 'bg_spec':
@@ -220,12 +425,12 @@ class EDSSpectrumRecord:
                     raise ValueError(f"Background spectrum required for bg_fit_mode='bg_spec' but none loaded")
                 
                 # Create model with only sample elements
-                self.signal.set_elements(original_elements)
-                self.model = self.signal.create_model(auto_add_lines=True, auto_background=True)
+                fit_signal.set_elements(original_elements)
+                self.model = fit_signal.create_model(auto_add_lines=True, auto_background=True)
                 self.model.add_family_lines()
                 
                 # Add ScalableFixedPattern component for instrument background
-                comp_bg = hs.model.components1D.ScalableFixedPattern(self._background)
+                comp_bg = hs.model.components1D.ScalableFixedPattern(self._background_fit_signal)
                 comp_bg.name = 'instrument'
                 # Instrument/background spectra should share the same energy calibration.
                 # Letting xscale float makes the whole fit nonlinear with negligible benefit.
@@ -256,15 +461,22 @@ class EDSSpectrumRecord:
             
             # Restore original elements if we added bg_elements
             if self.bg_fit_mode == 'bg_elements':
-                self.signal.set_elements(original_elements)
+                fit_signal.set_elements(original_elements)
+
+            self._sync_raw_signal_from_fit()
+
+            self._refresh_display_signal_cache()
                 
         except Exception as e:
             print(f"Warning: Could not fit model for {self.name}: {e}")
             self.model = None
             self.fitted_intensities = None
+            self.fitted_external_clean_signal = None
+            self.fitted_external_bg_signal = None
             self.signal_clean = None
             self.signal_bg = None
             self.reduced_chisq = None
+            self._refresh_display_signal_cache()
 
     def _get_instrument_component(self):
         if self.model is None:
@@ -319,9 +531,10 @@ class EDSSpectrumRecord:
         
         try:
             # Get initial values
+            fit_signal = self.get_signal_for_fit()
             initial_chisq = float(self.model.red_chisq.data.item() if hasattr(self.model.red_chisq.data, 'item') else self.model.red_chisq.data)
-            initial_offset = self.signal.axes_manager[-1].offset
-            initial_resolution = self.signal.metadata.Acquisition_instrument.TEM.Detector.EDS.energy_resolution_MnKa
+            initial_offset = fit_signal.axes_manager[-1].offset
+            initial_resolution = fit_signal.metadata.Acquisition_instrument.TEM.Detector.EDS.energy_resolution_MnKa
             
             print(f"\n=== Fine-tuning {self.name} ===")
             print(f"Initial χ²ᵣ: {initial_chisq:.2f}")
@@ -332,7 +545,7 @@ class EDSSpectrumRecord:
             # This includes internal fitting with all parameters free
             with _small_signal_numexpr():
                 self.model.calibrate_energy_axis(calibrate='offset')
-            offset_1 = self.signal.axes_manager[-1].offset
+            offset_1 = fit_signal.axes_manager[-1].offset
             chisq_1 = float(self.model.red_chisq.data.item() if hasattr(self.model.red_chisq.data, 'item') else self.model.red_chisq.data)
             print(f"\nAfter offset calibration:")
             print(f"  Offset: {offset_1:.6f} keV (Δ = {(offset_1 - initial_offset)*1000:.2f} eV)")
@@ -357,7 +570,7 @@ class EDSSpectrumRecord:
                 for param in locked_params:
                     param.free = True
                 
-                resolution_2 = self.signal.metadata.Acquisition_instrument.TEM.Detector.EDS.energy_resolution_MnKa
+                resolution_2 = fit_signal.metadata.Acquisition_instrument.TEM.Detector.EDS.energy_resolution_MnKa
                 chisq_2 = float(self.model.red_chisq.data.item() if hasattr(self.model.red_chisq.data, 'item') else self.model.red_chisq.data)
                 print(f"\nAfter resolution calibration (with locked parameters):")
                 print(f"  Resolution: {resolution_2:.2f} eV (Δ = {resolution_2 - initial_resolution:.2f} eV)")
@@ -379,8 +592,8 @@ class EDSSpectrumRecord:
                 print(f"  χ²ᵣ: {final_chisq:.2f} (Δ = {final_chisq - chisq_2:.2f}, {((final_chisq/chisq_2 - 1)*100):.1f}%)")
             
             # Summary
-            final_resolution = self.signal.metadata.Acquisition_instrument.TEM.Detector.EDS.energy_resolution_MnKa
-            final_offset = self.signal.axes_manager[-1].offset
+            final_resolution = fit_signal.metadata.Acquisition_instrument.TEM.Detector.EDS.energy_resolution_MnKa
+            final_offset = fit_signal.axes_manager[-1].offset
             total_offset_change = (final_offset - initial_offset) * 1000  # in eV
             total_resolution_change = final_resolution - initial_resolution
             total_chisq_change = final_chisq - initial_chisq
@@ -403,6 +616,7 @@ class EDSSpectrumRecord:
             
             # Re-compute fitted signals
             self._compute_fitted_signals()
+            self._sync_raw_signal_from_fit()
             
         except Exception as e:
             raise RuntimeError(f"Could not fine-tune model for {self.name}: {e}")
@@ -417,9 +631,10 @@ class EDSSpectrumRecord:
             raise ValueError(f"No fitted model to fine-tune for {self.name}")
 
         try:
+            fit_signal = self.get_signal_for_fit()
             initial_chisq = float(self.model.red_chisq.data.item() if hasattr(self.model.red_chisq.data, 'item') else self.model.red_chisq.data)
-            initial_offset = self.signal.axes_manager[-1].offset
-            initial_resolution = self.signal.metadata.Acquisition_instrument.TEM.Detector.EDS.energy_resolution_MnKa
+            initial_offset = fit_signal.axes_manager[-1].offset
+            initial_resolution = fit_signal.metadata.Acquisition_instrument.TEM.Detector.EDS.energy_resolution_MnKa
             instrument = self._get_instrument_component()
             initial_bg_shift = instrument.shift.value if instrument is not None else None
 
@@ -435,7 +650,7 @@ class EDSSpectrumRecord:
                 instrument.shift.free = False
             with _small_signal_numexpr():
                 self.model.calibrate_energy_axis(calibrate='offset')
-            offset_1 = self.signal.axes_manager[-1].offset
+            offset_1 = fit_signal.axes_manager[-1].offset
             chisq_1 = float(self.model.red_chisq.data.item() if hasattr(self.model.red_chisq.data, 'item') else self.model.red_chisq.data)
             print(f"\nAfter offset calibration:")
             print(f"  Offset: {offset_1:.6f} keV (Δ = {(offset_1 - initial_offset) * 1000:.2f} eV)")
@@ -462,7 +677,7 @@ class EDSSpectrumRecord:
                 for param in locked_params:
                     param.free = True
 
-                resolution_2 = self.signal.metadata.Acquisition_instrument.TEM.Detector.EDS.energy_resolution_MnKa
+                resolution_2 = fit_signal.metadata.Acquisition_instrument.TEM.Detector.EDS.energy_resolution_MnKa
                 chisq_3 = float(self.model.red_chisq.data.item() if hasattr(self.model.red_chisq.data, 'item') else self.model.red_chisq.data)
                 print(f"\nAfter resolution calibration (with locked parameters):")
                 print(f"  Resolution: {resolution_2:.2f} eV (Δ = {resolution_2 - initial_resolution:.2f} eV)")
@@ -484,8 +699,8 @@ class EDSSpectrumRecord:
                 print(f"\nAfter final refinement fit:")
                 print(f"  χ²ᵣ: {final_chisq:.2f} (Δ = {final_chisq - chisq_3:.2f}, {((final_chisq / chisq_3 - 1) * 100):.1f}%)")
 
-            final_resolution = self.signal.metadata.Acquisition_instrument.TEM.Detector.EDS.energy_resolution_MnKa
-            final_offset = self.signal.axes_manager[-1].offset
+            final_resolution = fit_signal.metadata.Acquisition_instrument.TEM.Detector.EDS.energy_resolution_MnKa
+            final_offset = fit_signal.axes_manager[-1].offset
             final_bg_shift = instrument.shift.value if instrument is not None else None
             total_offset_change = (final_offset - initial_offset) * 1000
             total_resolution_change = final_resolution - initial_resolution
@@ -506,6 +721,8 @@ class EDSSpectrumRecord:
                 self.reduced_chisq = None
 
             self._compute_fitted_signals()
+            self._sync_raw_signal_from_fit()
+            self._refresh_display_signal_cache()
 
         except Exception as e:
             raise RuntimeError(f"Could not fine-tune model for {self.name}: {e}")
@@ -516,50 +733,46 @@ class EDSSpectrumRecord:
         Called automatically after fit_model() for efficiency.
         """
         if self.model is None:
+            self.fitted_external_clean_signal = None
+            self.fitted_external_bg_signal = None
             self.signal_clean = None
             self.signal_bg = None
             return
         
         try:
-            # Identify background components
             bg_component_names = []
-            
+
             if self.bg_fit_mode == 'bg_spec':
-                # In bg_spec mode, 'instrument' is the background
                 bg_component_names = ['instrument']
-            elif self.bg_fit_mode == 'bg_elements':
-                # In bg_elements mode, all lines from bg_elements are background
-                # Check various ways components might identify their element
+            elif self.bg_fit_mode == 'bg_elements' and not self.has_bg_element_overlap():
                 for comp in self.model:
                     comp_element = None
-                    
-                    # Try different ways to get the element
                     if hasattr(comp, 'element'):
                         comp_element = comp.element
                     elif hasattr(comp, 'name'):
-                        # Parse element from name (e.g., 'Cu_Ka' -> 'Cu')
                         name_parts = comp.name.split('_')
                         if len(name_parts) >= 2:
                             comp_element = name_parts[0]
-                    
+
                     if comp_element and comp_element in self.bg_elements:
                         bg_component_names.append(comp.name)
-            
+
             if bg_component_names:
-                # Compute background signal (sum of background components)
-                self.signal_bg = self.model.as_signal(component_list=bg_component_names)
-                
-                # Compute clean signal (original minus background)
-                self.signal_clean = self.signal - self.signal_bg
+                self.fitted_external_bg_signal = self.model.as_signal(component_list=bg_component_names)
+                self.fitted_external_clean_signal = self._fit_signal - self.fitted_external_bg_signal
             else:
-                # No background components found
-                self.signal_bg = None
-                self.signal_clean = None
-                
+                self.fitted_external_bg_signal = None
+                self.fitted_external_clean_signal = None
+
+            self.signal_bg = self.fitted_external_bg_signal
+            self.signal_clean = self.fitted_external_clean_signal
+                 
         except Exception as e:
             print(f"Warning: Could not compute fitted signals for {self.name}: {e}")
             import traceback
             traceback.print_exc()
+            self.fitted_external_clean_signal = None
+            self.fitted_external_bg_signal = None
             self.signal_clean = None
             self.signal_bg = None
 
@@ -586,7 +799,9 @@ class EDSSpectrumRecord:
 
         # Plot
         if use_model is None:
-            use_model = self.model is not None
+            use_model = self.uses_model_plot()
+        elif use_model and not self.uses_model_plot():
+            use_model = False
         
         # Determine which elements to show
         # In bg_elements mode with a fit, show all elements (sample + bg)
@@ -594,9 +809,10 @@ class EDSSpectrumRecord:
         show_lines = bool(elements_to_show)
         
         # Temporarily set elements for display if in bg_elements mode with fit
-        original_elements = self.signal.metadata.get_item('Sample.elements', default=[])
+        plot_signal = self._fit_signal if use_model and self.model is not None else self.signal
+        original_elements = plot_signal.metadata.get_item('Sample.elements', default=[])
         if show_lines and elements_to_show != original_elements:
-            self.signal.set_elements(elements_to_show)
+            plot_signal.set_elements(elements_to_show)
         
         try:
             if use_model and self.model is not None:
@@ -606,29 +822,39 @@ class EDSSpectrumRecord:
                     navigator=None,
                     **kwargs
                 )
+                if self.display_signal_mode == 'fitted_external_bg_subtracted':
+                    self._apply_fitted_bg_subtracted_plot_callbacks()
             else:
-                self.signal.plot(show_lines, navigator=None, **kwargs)
+                plot_signal.plot(show_lines, navigator=None, **kwargs)
         finally:
             # Restore original elements
             if elements_to_show != original_elements:
-                self.signal.set_elements(original_elements)
+                plot_signal.set_elements(original_elements)
 
         # Extract new fig/ax (check if plot exists)
-        if self.signal._plot is None or not hasattr(self.signal._plot, 'signal_plot'):
+        if plot_signal._plot is None or not hasattr(plot_signal._plot, 'signal_plot'):
             return None, None
         
-        fig_new = self.signal._plot.signal_plot.figure
-        ax_new = self.signal._plot.signal_plot.ax
+        fig_new = plot_signal._plot.signal_plot.figure
+        ax_new = plot_signal._plot.signal_plot.ax
         
-        # Plot background if requested and available
+        # Plot fitted external background if requested and available.
         if show_background and self.signal_bg is not None:
-            energy_axis = self.signal_bg.axes_manager['Energy'].axis
+            if use_model:
+                bg_signal = self.signal_bg
+            else:
+                bg_signal = self._make_signal_from_cps(
+                    self.signal_bg.data,
+                    unit=self.signal_unit,
+                    mode='fitted_external_bg_subtracted',
+                )
+            energy_axis = bg_signal.axes_manager['Energy'].axis
             # Fill area with transparency
-            ax_new.fill_between(energy_axis, 0, self.signal_bg.data, 
+            ax_new.fill_between(energy_axis, 0, bg_signal.data,
                                color='lightgray', alpha=0.4, 
                                label='Fitted Background')
             # Add line on top with no transparency
-            ax_new.plot(energy_axis, self.signal_bg.data, 
+            ax_new.plot(energy_axis, bg_signal.data,
                        color='gray', alpha=1.0, linewidth=1.0)
             ax_new.legend(loc='best')
 
@@ -645,7 +871,7 @@ class EDSSpectrumRecord:
         return fig_new, ax_new
 
     def get_metadata(self) -> Dict:
-        return self.signal.metadata.as_dictionary()
+        return self._signal.metadata.as_dictionary()
 
     def get_live_time(self, signal=None) -> Optional[float]:
         """Get measurement live time from metadata, or None if missing."""
@@ -656,133 +882,58 @@ class EDSSpectrumRecord:
             return None
 
     def set_background(self, bg_signal: exspy.signals.EDSTEMSpectrum):
-        """Set the background signal for subtraction. Always keep in counts."""
+        """Set the measured external background spectrum without changing active signal modes."""
         self._background = bg_signal
-        # If BG correction is active, recompute signal
-        current_quantity = self.signal.metadata.get_item('Signal.quantity', default='X-rays (Counts)')
-        bg_active = "BG" in current_quantity
-        unit = "cps" if "CPS" in current_quantity else "counts"
-        self.set_unit_and_bg(unit, bg_active)
+        self._background_fit_signal = self._make_cps_signal(bg_signal)
+        self._refresh_display_signal_cache()
 
     def set_unit_and_bg(self, unit: str, bg_correct: bool):
-        """
-        Set signal unit to 'counts' or 'cps', and apply/remove background correction.
-        Note: bg_correct parameter is kept for backwards compatibility but now maps to bg_correction_mode.
-        If bg_correct=True, uses 'subtract_spectra' mode; if False, uses 'none' mode.
-        For new code, use set_bg_correction_mode() directly.
-        """
-        if unit not in ('counts', 'cps'):
-            raise ValueError("unit must be 'counts' or 'cps'")
-        
-        # Map old bg_correct boolean to new bg_correction_mode
-        if bg_correct:
-            self.bg_correction_mode = 'subtract_spectra'
-        else:
-            self.bg_correction_mode = 'none'
-        
-        self._apply_unit_and_bg_correction(unit)
+        """Legacy compatibility shim."""
+        self.set_unit(unit)
+        self.set_bg_correction(bg_correct)
     
     def set_bg_correction_mode(self, mode: str):
-        """
-        Set background correction mode: 'none', 'subtract_fitted', or 'subtract_spectra'.
-        """
+        """Legacy compatibility shim mapping to both explicit signal source modes."""
         if mode not in ('none', 'subtract_fitted', 'subtract_spectra'):
             raise ValueError("mode must be 'none', 'subtract_fitted', or 'subtract_spectra'")
-        
-        self.bg_correction_mode = mode
-        
-        # Re-apply current unit with new bg_correction_mode
-        current_quantity = self.signal.metadata.get_item('Signal.quantity', default='X-rays (Counts)')
-        unit = "cps" if "CPS" in current_quantity else "counts"
-        self._apply_unit_and_bg_correction(unit)
+        mode_map = {
+            'none': 'raw',
+            'subtract_spectra': 'measured_bg_subtracted',
+            'subtract_fitted': 'fitted_external_bg_subtracted',
+        }
+        signal_mode = mode_map[mode]
+        self.set_display_signal_mode(signal_mode)
+        self.set_peak_sum_signal_mode(signal_mode)
     
     def _apply_unit_and_bg_correction(self, unit: str):
-        """
-        Internal method to apply unit conversion and background correction based on current settings.
-        """
-        current_quantity = self.signal.metadata.get_item('Signal.quantity', default='X-rays (Counts)')
-        already_cps = "CPS" in current_quantity
-        already_counts = "Counts" in current_quantity
-        
-        # Check if we need to do anything
-        current_bg_mode = self._get_current_bg_mode_from_quantity(current_quantity)
-        if ((unit == "cps" and already_cps) or (unit == "counts" and already_counts)) and \
-           (current_bg_mode == self.bg_correction_mode):
-            return
-
-        # Always start from raw signal
-        sig = self._signal
-        live_time_sig = self.get_live_time(sig)
-        if live_time_sig is None or live_time_sig == 0:
-            raise ValueError(f"Live time missing or zero for spectrum '{self.name}'")
-
-        # Apply background correction based on mode
-        # Note: 'subtract_fitted' is handled in compute_intensities, not here
-        if self.bg_correction_mode == 'subtract_spectra' and self._background is not None:
-            bg = self._background
-            live_time_bg = self.get_live_time(bg)
-            if live_time_bg is None or live_time_bg == 0:
-                raise ValueError(f"Live time missing or zero for background spectrum")
-            
-            # Always keep background in counts
-            bg_data = bg.data
-            
-            # Scale background and subtract
-            if unit == "counts":
-                scale = live_time_sig / live_time_bg
-                sig_data = sig.data - bg_data * scale
-            else:  # cps
-                sig_data = (sig.data / live_time_sig) - (bg_data / live_time_bg)
-            
-            self.signal = sig.deepcopy()
-            self.signal.data = sig_data
-        else:
-            # No spectral BG correction (none or subtract_fitted)
-            if unit == "counts":
-                self.signal = sig.deepcopy()
-                self.signal.data = sig.data
-            else:  # cps
-                self.signal = sig.deepcopy()
-                self.signal.data = sig.data / live_time_sig
-
-        # Set quantity string
-        bg_suffix = self._get_bg_suffix_for_quantity()
-        quantity = f"X-rays ({unit.capitalize()}{bg_suffix})"
-        self.signal.metadata.set_item('Signal.quantity', quantity)
-        self._bg_correction_active = (self.bg_correction_mode != 'none')
-
-        # Only invalidate intensities, NOT the model (bg_correction_mode doesn't affect fitting)
-        # The model stays valid because it was fitted on the original data
-        self.intensities = None
-        # Note: fitted_intensities from the model remain valid
+        """Legacy helper retained for callers that only intend to change signal units."""
+        self.set_unit(unit)
     
     def _get_current_bg_mode_from_quantity(self, quantity: str) -> str:
-        """Extract bg_correction_mode from quantity string."""
-        if ", BG Fitted" in quantity:
-            return 'subtract_fitted'
-        elif ", BG" in quantity:
-            return 'subtract_spectra'
-        else:
-            return 'none'
+        """Legacy helper mapping current explicit state to an old-style summary."""
+        return self.bg_correction_mode
     
     def _get_bg_suffix_for_quantity(self) -> str:
-        """Get suffix for Signal.quantity based on bg_correction_mode."""
-        if self.bg_correction_mode == 'subtract_fitted':
-            return ', BG Fitted'
-        elif self.bg_correction_mode == 'subtract_spectra':
-            return ', BG'
-        else:
-            return ''
+        """Legacy helper retained for compatibility with old callers."""
+        suffix_map = {
+            'none': '',
+            'subtract_fitted': ', Fitted External BG Subtracted',
+            'subtract_spectra': ', Measured BG Subtracted',
+            'mixed': ', Mixed BG Modes',
+        }
+        return suffix_map.get(self.bg_correction_mode, '')
 
     def set_unit(self, unit: str):
-        """Legacy: just call set_unit_and_bg with current BG state."""
-        self.set_unit_and_bg(unit, self._bg_correction_active)
+        if unit not in ('counts', 'cps'):
+            raise ValueError("unit must be 'counts' or 'cps'")
+        self.signal_unit = unit
+        self._refresh_display_signal_cache()
 
     def set_bg_correction(self, active: bool):
-        """Legacy: just call set_unit_and_bg with current unit."""
-        current_quantity = self.signal.metadata.get_item('Signal.quantity', default='X-rays (Counts)')
-        unit = "cps" if "CPS" in current_quantity else "counts"
-        self.set_unit_and_bg(unit, active)
+        """Legacy compatibility shim."""
+        mode = 'measured_bg_subtracted' if active else 'raw'
+        self.set_display_signal_mode(mode)
+        self.set_peak_sum_signal_mode(mode)
     
     def set_bg_elements(self, elements: List[str]):
         """Set background elements (used in bg_elements fit mode)."""
@@ -792,6 +943,9 @@ class EDSSpectrumRecord:
             if self.model is not None and self.bg_fit_mode == 'bg_elements':
                 print(f"Refitting model for {self.name} with updated BG elements...")
                 self.fit_model()
+            else:
+                self._compute_fitted_signals()
+                self._refresh_display_signal_cache()
     
     def set_bg_fit_mode(self, mode: str):
         """
@@ -809,6 +963,12 @@ class EDSSpectrumRecord:
             # Invalidate existing fit
             self.model = None
             self.fitted_intensities = None
+            self.fitted_external_clean_signal = None
+            self.fitted_external_bg_signal = None
+            self.signal_clean = None
+            self.signal_bg = None
+            self.reduced_chisq = None
+            self._refresh_display_signal_cache()
     
     def get_all_elements_for_display(self) -> List[str]:
         """
@@ -834,7 +994,8 @@ class EDSSession:
         bg_signal = None
         bg_elements = []
         bg_fit_mode = 'bg_spec'
-        bg_correction_mode = 'none'
+        display_signal_mode = 'raw'
+        peak_sum_signal_mode = 'raw'
         unit = "counts"
         bg_file = None
         
@@ -844,8 +1005,9 @@ class EDSSession:
             bg_signal = first_rec._background
             bg_elements = first_rec.bg_elements
             bg_fit_mode = first_rec.bg_fit_mode
-            bg_correction_mode = first_rec.bg_correction_mode
-            unit = "cps" if "CPS" in first_rec.signal.metadata.get_item('Signal.quantity', default='X-rays (Counts)') else "counts"
+            display_signal_mode = first_rec.display_signal_mode
+            peak_sum_signal_mode = first_rec.peak_sum_signal_mode
+            unit = first_rec.signal_unit
             bg_file = getattr(first_rec, "bg_file", None)
 
         for rec in [EDSSpectrumRecord(p) for p in paths]:
@@ -862,13 +1024,9 @@ class EDSSession:
             # Set background handling settings
             rec.bg_elements = bg_elements
             rec.bg_fit_mode = bg_fit_mode
-            rec.set_bg_correction_mode(bg_correction_mode)
-            
-            # Apply unit conversion (will use the bg_correction_mode set above)
-            current_quantity = rec.signal.metadata.get_item('Signal.quantity', default='X-rays (Counts)')
-            current_unit = "cps" if "CPS" in current_quantity else "counts"
-            if unit != current_unit:
-                rec._apply_unit_and_bg_correction(unit)
+            rec.set_unit(unit)
+            rec.set_display_signal_mode(display_signal_mode)
+            rec.set_peak_sum_signal_mode(peak_sum_signal_mode)
             
             if bg_file:
                 rec.bg_file = bg_file
@@ -908,9 +1066,13 @@ class EDSSession:
     def set_energy_resolution(self, resolution_ev: float):
         """Set the energy resolution (FWHM at Mn Ka) for all spectra in eV."""
         for rec in self.records.values():
-            rec.signal.set_microscope_parameters(
-                energy_resolution_MnKa=resolution_ev
-            )
+            rec._signal.set_microscope_parameters(energy_resolution_MnKa=resolution_ev)
+            rec._fit_signal.set_microscope_parameters(energy_resolution_MnKa=resolution_ev)
+            if rec._background is not None:
+                rec._background.set_microscope_parameters(energy_resolution_MnKa=resolution_ev)
+            if rec._background_fit_signal is not None:
+                rec._background_fit_signal.set_microscope_parameters(energy_resolution_MnKa=resolution_ev)
+            rec._refresh_display_signal_cache()
 
     def compute_all_intensities(self):
         for rec in self.records.values():
@@ -976,6 +1138,14 @@ class EDSSession:
         """Set unit for all spectra ('counts' or 'cps')."""
         for rec in self.records.values():
             rec.set_unit(unit)
+
+    def set_display_signal_mode(self, mode: str):
+        for rec in self.records.values():
+            rec.set_display_signal_mode(mode)
+
+    def set_peak_sum_signal_mode(self, mode: str):
+        for rec in self.records.values():
+            rec.set_peak_sum_signal_mode(mode)
 
     def set_bg_correction(self, active: bool):
         """Enable/disable background subtraction for all records."""
