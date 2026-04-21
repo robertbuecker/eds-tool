@@ -2,8 +2,8 @@
 
 This directory contains the essential tests for the EDS Tool. These tests verify core functionality, performance, and correct behavior after code changes.
 
-**Last Updated**: 2026-04-16  
-**Total Tests**: 8 (7 automated + 1 manual GUI test)
+**Last Updated**: 2026-04-20  
+**Total Tests**: 9 (8 automated + 1 manual GUI test)
 
 ---
 
@@ -20,12 +20,51 @@ powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python test
 
 # Performance & behavior tests
 powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_fine_tune_timing.py
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_refinement_stability.py
 powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_calibrate_includes_fit.py
 powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_param_locking.py
 
 # Manual GUI test (requires interaction)
 powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_fine_tune_gui.py
 ```
+
+---
+
+#### `test_refinement_stability.py` â­
+
+**Purpose**: Verify that fine-tuning keeps a robust post-refinement model, respects the hard resolution bounds, and that fit-range settings/reset behavior are stable
+
+**What it tests**:
+- The reported `acac/exp_7993.EDS` failure case no longer blows up after fine-tuning
+- A fresh `fit_model()` immediately after fine-tuning reproduces the same `Ï‡Â²áµ£`
+- The kept calibrated state rejects unstable transient resolution-calibration results when needed
+- `clear_fit()` resets offset, resolution, and stored reference-BG shift
+- Fit lower/upper limits and reference-BG ignore width propagate to newly loaded spectra in a session
+
+**Updated Notes (2026-04-20)**:
+- A fresh `fit_model()` immediately after fine-tuning now stays improved and does not blow up.
+- Resolution calibration is hard-bounded to `127-130 eV`, with warnings when the fit hits a bound.
+- `test_refinement_stability.py` now also checks the batch-average improvement from applying the active refined calibration to the fitted `acac` set.
+
+**Success Criteria**:
+- âœ… `exp_7993` improves after `fine_tune_model()`
+- âœ… Immediate refit after fine-tuning stays numerically stable
+- âœ… The final kept resolution stays sane (currently 128 eV for the reported `acac` case)
+- âœ… `clear_fit()` removes both the model and the hidden fine-tuned calibration state
+- âœ… New spectra inherit the current fit-range settings
+
+**When to Run**:
+- After changes to `fine_tune_model()`
+- After changes to `clear_fit()`
+- After changes to fit-range or reference-BG-shift handling
+- When validating multi-spectrum reference-BG workflows
+
+**Files Used**:
+- `acac/exp_7993.EDS`
+- `acac/near_7994.EDS`
+- `grain1_thin.eds`
+- `grain1_thick.eds`
+- `bg_near_grain1_thin.eds`
 
 ---
 
@@ -158,6 +197,10 @@ Background energy resolution: 128 eV
 3. `bg_spec` mode (ScalableFixedPattern with CPS-normalized background spectrum)
 4. Explicit display / peak-sum source modes
 5. Rejection of invalid fitted-background subtraction
+6. Additional fit-background modes:
+   - `bg_fit_mode='none'`
+   - two-step reference-BG prefit with sample exclusion
+   - two-step BG-elements-only prefit
 
 **Expected Output**:
 ```
@@ -221,6 +264,7 @@ All tests completed!
 2. Element propagation to all spectra
 3. BG elements propagation
 4. Background spectrum loading for all
+5. Active-record display-mode changes do not fail just because other loaded spectra are still unfitted
 5. BG fit mode propagation
 6. Stable background mode / unit propagation
 7. Fitted subtraction availability only when the reference background is identifiable

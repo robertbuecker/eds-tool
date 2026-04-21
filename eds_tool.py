@@ -44,6 +44,18 @@ SIGNAL_MODE_ITEMS = [
     ("measured_bg_subtracted", "Subtract measured"),
 ]
 
+BACKGROUND_FIT_MODE_ITEMS = [
+    ("none", "None"),
+    ("bg_elements", "BG Elements"),
+    ("bg_spec", "Ref BG Spec"),
+]
+
+BACKGROUND_PREFIT_MODE_ITEMS = [
+    ("off", "Off"),
+    ("exclude_sample", "Exclude sample"),
+    ("bg_elements_only", "BG el. only"),
+]
+
 def auto_workflow(session: EDSSession, max_energy: Optional[float] = None, use_cps: bool = False):
     """
     Automatic workflow for EDS analysis without GUI.
@@ -251,8 +263,9 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         fit_bg_row = QtWidgets.QHBoxLayout()
         fit_bg_row.addWidget(QtWidgets.QLabel("Fit background:"))
         self.fit_bg_combo = QtWidgets.QComboBox()
-        self.fit_bg_combo.addItems(["BG Elements", "BG Spec (recommended)"])
-        self.fit_bg_combo.setCurrentIndex(1)
+        for _mode, label in BACKGROUND_FIT_MODE_ITEMS:
+            self.fit_bg_combo.addItem(label)
+        self.fit_bg_combo.setCurrentIndex(2)
         fit_bg_row.addWidget(self.fit_bg_combo, 1)
         setup_layout.addLayout(fit_bg_row)
         self.fit_bg_combo.currentIndexChanged.connect(self._on_fit_bg_mode_changed)
@@ -260,10 +273,12 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         bg_el_layout = QtWidgets.QHBoxLayout()
         self.bg_el_edit = QtWidgets.QLineEdit(",".join(self.session.active_record.bg_elements if self.session.active_record else []))
         self.bg_el_edit.setClearButtonEnabled(True)
+        self.bg_el_apply_btn = QtWidgets.QPushButton("Apply")
         bg_el_layout.addWidget(QtWidgets.QLabel("BG elements:"))
-        bg_el_layout.addWidget(self.bg_el_edit)
+        bg_el_layout.addWidget(self.bg_el_edit, 1)
+        bg_el_layout.addWidget(self.bg_el_apply_btn)
         setup_layout.addLayout(bg_el_layout)
-        self.bg_el_edit.textChanged.connect(self.apply_bg_elements)
+        self.bg_el_apply_btn.clicked.connect(self.apply_bg_elements)
 
         self.bg_file_label = QtWidgets.QLabel("No reference BG loaded")
         self.bg_file_label.setStyleSheet(
@@ -312,7 +327,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self.fit_all_btn.clicked.connect(self.fit_spectrum_all)
 
         self.finetune_btn = QtWidgets.QPushButton("Refine")
-        self.finetune_all_btn = QtWidgets.QPushButton("Refine")
+        self.finetune_all_btn = QtWidgets.QPushButton("Apply")
         fitting_grid.addWidget(QtWidgets.QLabel("Fine-tune"), 3, 0)
         fitting_grid.addWidget(self.finetune_btn, 3, 1)
         fitting_grid.addWidget(self.finetune_all_btn, 3, 2)
@@ -350,6 +365,58 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         peak_layout.addWidget(self.peak_sum_mode_combo, 1)
         peak_advanced_layout.addLayout(peak_layout)
 
+        fit_range_row = QtWidgets.QHBoxLayout()
+        fit_range_row.addWidget(QtWidgets.QLabel("Fit range:"))
+        self.fit_lower_spin = QtWidgets.QDoubleSpinBox()
+        self.fit_lower_spin.setDecimals(2)
+        self.fit_lower_spin.setRange(0.0, 39.99)
+        self.fit_lower_spin.setSingleStep(0.05)
+        self.fit_lower_spin.setSuffix(" kV")
+        self.fit_lower_spin.setValue(self.session.active_record.fit_energy_min_keV if self.session.active_record else 0.1)
+        self.fit_upper_spin = QtWidgets.QDoubleSpinBox()
+        self.fit_upper_spin.setDecimals(2)
+        self.fit_upper_spin.setRange(0.01, 40.0)
+        self.fit_upper_spin.setSingleStep(0.5)
+        self.fit_upper_spin.setSuffix(" kV")
+        self.fit_upper_spin.setValue(self.session.active_record.fit_energy_max_keV if self.session.active_record else 40.0)
+        fit_range_row.addWidget(self.fit_lower_spin)
+        fit_range_row.addWidget(QtWidgets.QLabel("to"))
+        fit_range_row.addWidget(self.fit_upper_spin)
+        peak_advanced_layout.addLayout(fit_range_row)
+
+        ignore_row = QtWidgets.QHBoxLayout()
+        ignore_row.addWidget(QtWidgets.QLabel("Ignore sample ±"))
+        self.ignore_sample_spin = QtWidgets.QDoubleSpinBox()
+        self.ignore_sample_spin.setDecimals(2)
+        self.ignore_sample_spin.setRange(0.0, 2.0)
+        self.ignore_sample_spin.setSingleStep(0.05)
+        self.ignore_sample_spin.setSuffix(" kV")
+        self.ignore_sample_spin.setValue(
+            self.session.active_record.reference_bg_ignore_sample_half_width_keV if self.session.active_record else 0.0
+        )
+        ignore_row.addWidget(self.ignore_sample_spin)
+        ignore_row.addStretch()
+        peak_advanced_layout.addLayout(ignore_row)
+
+        bg_prefit_row = QtWidgets.QHBoxLayout()
+        bg_prefit_row.addWidget(QtWidgets.QLabel("BG prefit:"))
+        self.bg_prefit_combo = QtWidgets.QComboBox()
+        for mode, label in BACKGROUND_PREFIT_MODE_ITEMS:
+            self.bg_prefit_combo.addItem(label, mode)
+        bg_prefit_row.addWidget(self.bg_prefit_combo, 1)
+        peak_advanced_layout.addLayout(bg_prefit_row)
+
+        poly_row = QtWidgets.QHBoxLayout()
+        poly_row.addWidget(QtWidgets.QLabel("Poly order:"))
+        self.poly_order_spin = QtWidgets.QSpinBox()
+        self.poly_order_spin.setRange(1, 12)
+        self.poly_order_spin.setValue(
+            self.session.active_record.background_polynomial_order if self.session.active_record else 6
+        )
+        poly_row.addWidget(self.poly_order_spin)
+        poly_row.addStretch()
+        peak_advanced_layout.addLayout(poly_row)
+
         self.peak_sum_help_label = QtWidgets.QLabel("")
         self.peak_sum_help_label.setWordWrap(True)
         self.peak_sum_help_label.setStyleSheet("QLabel { color: #666; }")
@@ -359,6 +426,11 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
 
         self.advanced_peak_toggle.toggled.connect(self._toggle_advanced_peak_controls)
         self.peak_sum_mode_combo.currentIndexChanged.connect(self._on_peak_sum_mode_changed)
+        self.fit_lower_spin.valueChanged.connect(self._on_fit_range_changed)
+        self.fit_upper_spin.valueChanged.connect(self._on_fit_range_changed)
+        self.ignore_sample_spin.valueChanged.connect(self._on_ignore_sample_changed)
+        self.bg_prefit_combo.currentIndexChanged.connect(self._on_bg_prefit_mode_changed)
+        self.poly_order_spin.valueChanged.connect(self._on_poly_order_changed)
 
         self.display_group = QtWidgets.QGroupBox("Display and Tables")
         display_layout = QtWidgets.QVBoxLayout(self.display_group)
@@ -377,8 +449,12 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self.background_checkbox = QtWidgets.QCheckBox("Ref BG")
         self.background_checkbox.setChecked(False)
         self.background_checkbox.stateChanged.connect(self.toggle_background)
+        self.show_bg_elements_checkbox = QtWidgets.QCheckBox("BG el.")
+        self.show_bg_elements_checkbox.setChecked(False)
+        self.show_bg_elements_checkbox.stateChanged.connect(self.toggle_bg_elements)
         view_row.addWidget(self.residual_checkbox)
         view_row.addWidget(self.background_checkbox)
+        view_row.addWidget(self.show_bg_elements_checkbox)
         display_layout.addLayout(view_row)
         self.display_mode_combo.currentIndexChanged.connect(self._on_display_mode_changed)
 
@@ -460,17 +536,18 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         # Sync UI state with any command-line loaded background
         rec = self.session.active_record
         if rec is not None:
-            # Fit BG mode combo
-            if rec.bg_fit_mode == 'bg_elements':
-                self.fit_bg_combo.setCurrentIndex(0)
-            else:  # bg_spec
-                self.fit_bg_combo.setCurrentIndex(1)
-            
+            mode_index = {mode: i for i, (mode, _label) in enumerate(BACKGROUND_FIT_MODE_ITEMS)}
+            with QtCore.QSignalBlocker(self.fit_bg_combo):
+                self.fit_bg_combo.setCurrentIndex(mode_index.get(rec.bg_fit_mode, 2))
+
             # Enable/disable BG elements entry based on fit mode
-            self.bg_el_edit.setEnabled(rec.bg_fit_mode == 'bg_elements')
+            bg_elements_enabled = rec.bg_fit_mode == 'bg_elements'
+            self.bg_el_edit.setEnabled(bg_elements_enabled)
+            self.bg_el_apply_btn.setEnabled(bg_elements_enabled)
             self._update_background_label(rec)
             self._sync_background_mode_controls(rec)
             self._sync_display_controls(rec)
+            self._sync_fit_controls(rec)
         
     def _update_spectrum_count_label(self):
         count = len(self.session.records)
@@ -513,23 +590,25 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         # Sync UI controls with record state
         rec = self.session.active_record
         if rec is not None:
-            # Fit BG mode combo
-            if rec.bg_fit_mode == 'bg_elements':
-                self.fit_bg_combo.setCurrentIndex(0)
-            else:  # bg_spec
-                self.fit_bg_combo.setCurrentIndex(1)
-            
+            mode_index = {mode: i for i, (mode, _label) in enumerate(BACKGROUND_FIT_MODE_ITEMS)}
+            with QtCore.QSignalBlocker(self.fit_bg_combo):
+                self.fit_bg_combo.setCurrentIndex(mode_index.get(rec.bg_fit_mode, 2))
+
             # Enable/disable BG elements entry based on fit mode
-            self.bg_el_edit.setEnabled(rec.bg_fit_mode == 'bg_elements')
+            bg_elements_enabled = rec.bg_fit_mode == 'bg_elements'
+            self.bg_el_edit.setEnabled(bg_elements_enabled)
+            self.bg_el_apply_btn.setEnabled(bg_elements_enabled)
             self._update_background_label(rec)
             self._sync_background_mode_controls(rec)
             self._sync_display_controls(rec)
+            self._sync_fit_controls(rec)
         
         self.update_plot()
 
     def _toggle_advanced_peak_controls(self, checked):
         self.advanced_peak_widget.setVisible(checked)
         self.advanced_peak_toggle.setArrowType(QtCore.Qt.DownArrow if checked else QtCore.Qt.RightArrow)
+        QtCore.QTimer.singleShot(0, self._resize_for_content_change)
 
     def _set_signal_mode_combo_state(self, combo, selected_mode, enabled_modes):
         with QtCore.QSignalBlocker(combo):
@@ -557,7 +636,10 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             )
         if rec.bg_fit_mode == 'bg_spec' and rec._background is None:
             return "Load a reference BG to enable BG Spec modeling and measured subtraction."
-        return "Peak-sum sources affect get_lines_intensity() only. Use the raw source unless you explicitly need a reference-BG-subtracted sum."
+        return (
+            "Peak-sum sources affect get_lines_intensity() only. Fit limits apply to fit/fine-tune. "
+            "Ignore sample ± only affects reference-BG shift refinement."
+        )
 
     def _sync_background_mode_controls(self, rec=None):
         rec = rec or self.session.active_record
@@ -576,6 +658,71 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self._set_signal_mode_combo_state(self.display_mode_combo, rec.display_signal_mode, display_enabled_modes)
         self._set_signal_mode_combo_state(self.peak_sum_mode_combo, rec.peak_sum_signal_mode, peak_enabled_modes)
         self.peak_sum_help_label.setText(self._get_peak_sum_mode_help_text(rec))
+
+    def _get_peak_sum_mode_help_text(self, rec):
+        if rec is None:
+            return ""
+        if rec.bg_fit_mode == 'bg_elements' and rec.has_bg_element_overlap():
+            return (
+                "Fitted reference BG is unavailable in BG Elements mode when "
+                "background elements overlap the sample elements."
+            )
+        if rec.model is None:
+            return (
+                "Fit a model to enable fitted reference BG. "
+                "Measured subtraction requires a loaded reference BG."
+            )
+        if rec.bg_fit_mode == 'bg_spec' and rec._background is None:
+            return "Load a reference BG to enable BG Spec modeling and measured subtraction."
+        return (
+            "Peak-sum source only affects get_lines_intensity(). BG prefit runs a two-step fit. "
+            "Ignore sample +/- affects BG prefit and reference-BG shift refinement."
+        )
+
+    def _sync_fit_controls(self, rec=None):
+        rec = rec or self.session.active_record
+        if rec is None:
+            return
+        with QtCore.QSignalBlocker(self.fit_lower_spin), QtCore.QSignalBlocker(self.fit_upper_spin), QtCore.QSignalBlocker(self.ignore_sample_spin), QtCore.QSignalBlocker(self.bg_prefit_combo), QtCore.QSignalBlocker(self.poly_order_spin):
+            self.fit_lower_spin.setMaximum(max(0.0, rec.fit_energy_max_keV - 0.01))
+            self.fit_upper_spin.setMinimum(rec.fit_energy_min_keV + 0.01)
+            self.fit_lower_spin.setValue(rec.fit_energy_min_keV)
+            self.fit_upper_spin.setValue(rec.fit_energy_max_keV)
+            self.ignore_sample_spin.setValue(rec.reference_bg_ignore_sample_half_width_keV)
+            self.bg_prefit_combo.setCurrentIndex(self.bg_prefit_combo.findData(rec.background_prefit_mode))
+            self.poly_order_spin.setValue(rec.background_polynomial_order)
+
+    def _on_fit_range_changed(self):
+        lower = self.fit_lower_spin.value()
+        upper = self.fit_upper_spin.value()
+        self.fit_lower_spin.setMaximum(max(0.0, upper - 0.01))
+        self.fit_upper_spin.setMinimum(lower + 0.01)
+        try:
+            self.session.set_fit_energy_range(lower, upper)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Fit Range Error", str(e))
+            self._sync_fit_controls()
+
+    def _on_ignore_sample_changed(self):
+        try:
+            self.session.set_reference_bg_ignore_sample_half_width(self.ignore_sample_spin.value())
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Ignore Range Error", str(e))
+            self._sync_fit_controls()
+
+    def _on_bg_prefit_mode_changed(self):
+        try:
+            self.session.set_background_prefit_mode(self.bg_prefit_combo.currentData())
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "BG Prefit Error", str(e))
+            self._sync_fit_controls()
+
+    def _on_poly_order_changed(self):
+        try:
+            self.session.set_background_polynomial_order(self.poly_order_spin.value())
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Polynomial Order Error", str(e))
+            self._sync_fit_controls()
 
     def _sync_display_controls(self, rec=None):
         rec = rec or self.session.active_record
@@ -645,6 +792,15 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         else:
             self.fitting_group.setTitle(f"Fitting and Quantification (χ²ᵣ: {rec.reduced_chisq:.4f})")
 
+    def _update_fitting_group_title(self, rec=None):
+        rec = rec or self.session.active_record
+        if rec is None or rec.reduced_chisq is None:
+            self.fitting_group.setTitle("Fitting and Quantification")
+        else:
+            self.fitting_group.setTitle(
+                f"Fitting and Quantification (χ²ᵣ: {rec.reduced_chisq:.4f}, Res: {rec.get_energy_resolution():.2f} eV)"
+            )
+
     def apply_elements(self):
         # Always update elements, even if empty
         els = [e.strip() for e in self.el_edit.text().split(",") if e.strip()]
@@ -675,7 +831,8 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             ax=self.ax,
             fig=self.fig,
             show_residual=self.residual_checkbox.isChecked(),
-            show_background=self.background_checkbox.isChecked()
+            show_background=self.background_checkbox.isChecked(),
+            show_bg_elements=self.show_bg_elements_checkbox.isChecked()
         )
         
         self.fig = fig
@@ -810,8 +967,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
     def remove_fit_active(self):
         rec = self.session.active_record
         if rec is not None:
-            rec.model = None
-            rec.fitted_intensities = None
+            rec.clear_fit()
             self.update_plot(force_replot=True)
             # Update the fitted table view if open
             if self.show_fitted_table_checkbox.isChecked():
@@ -819,13 +975,13 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
 
     def remove_fit_all(self):
         for rec in self.session.records.values():
-            rec.model = None
-            rec.fitted_intensities = None
+            rec.clear_fit()
         self.update_plot(force_replot=True)
         for title in list(self.table_views.keys()):
             if "Fitted Line Intensities" in title:
-                self.table_views[title].close()
-                del self.table_views[title]
+                dialog = self.table_views.pop(title, None)
+                if dialog is not None:
+                    dialog.close()
     
     def fine_tune_active(self):
         """Fine-tune the fitted model for the active spectrum."""
@@ -848,17 +1004,20 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self.update_plot(force_replot=True)
     
     def fine_tune_all(self):
-        """Fine-tune all fitted models in the session."""
-        # Check if any models exist
-        has_models = any(rec.model is not None for rec in self.session.records.values())
-        if not has_models:
+        """Apply the active spectrum's refined calibration to all fitted models."""
+        rec = self.session.active_record
+        if rec is None or rec.model is None:
             QtWidgets.QMessageBox.warning(
-                self, "No Fitted Models", 
-                "Please fit models first before fine-tuning."
+                self, "No Fitted Model",
+                "Please fit and refine the selected spectrum first."
             )
             return
-        
-        self.session.fine_tune_all_models()
+
+        try:
+            self.session.apply_active_fine_tuning_to_all_models()
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Apply Fine-Tuning Error", str(e))
+            return
         
         # Update fitted intensity table if visible
         if self.show_fitted_table_checkbox.isChecked():
@@ -902,6 +1061,19 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self.update_plot(force_replot=True)
     
     def toggle_background(self):
+        rec = self.session.active_record
+        if (
+            self.background_checkbox.isChecked()
+            and rec is not None
+            and rec.model is None
+            and rec._background is not None
+            and rec.signal_unit != "cps"
+        ):
+            self.session.set_unit("cps")
+            self._sync_display_controls(rec)
+        self.update_plot(force_replot=True)
+
+    def toggle_bg_elements(self):
         self.update_plot(force_replot=True)
 
     def reset_y(self):
@@ -965,6 +1137,18 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         finally:
             self.setUpdatesEnabled(True)
         self.repaint()
+
+    def _resize_for_content_change(self):
+        self.ensurePolished()
+        self.updateGeometry()
+        self._activate_layout_tree(self)
+        if not self.isVisible():
+            return
+        screen = self.screen() or QtWidgets.QApplication.primaryScreen()
+        max_height = screen.availableGeometry().height() if screen is not None else 1200
+        target_height = min(max(self.minimumHeight(), self.sizeHint().height()), max_height)
+        if abs(target_height - self.height()) >= 2:
+            self.resize(self.width(), target_height)
 
     def _activate_layout_tree(self, widget):
         layout = widget.layout()
@@ -1205,11 +1389,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
     
     def _on_fit_bg_mode_changed(self):
         """Handle changes to fit background mode combo box."""
-        mode_map = {
-            0: 'bg_elements',  # "BG Elements"
-            1: 'bg_spec'  # "BG Spec (recommended)"
-        }
-        mode = mode_map.get(self.fit_bg_combo.currentIndex(), 'bg_spec')
+        mode = BACKGROUND_FIT_MODE_ITEMS[self.fit_bg_combo.currentIndex()][0]
         
         # If switching to bg_spec without BG loaded, prompt to load one
         if mode == 'bg_spec':
@@ -1224,16 +1404,18 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
                 self._on_bg_open()
                 # Check again if BG was loaded
                 if first_rec._background is None:
-                    # User cancelled, revert to bg_elements
+                    # User cancelled, revert to None
                     self.fit_bg_combo.blockSignals(True)
                     self.fit_bg_combo.setCurrentIndex(0)
                     self.fit_bg_combo.blockSignals(False)
-                    mode = 'bg_elements'
+                    mode = 'none'
         
         try:
             self.session.set_bg_fit_mode(mode)
             # Update BG elements field enable state
-            self.bg_el_edit.setEnabled(mode == 'bg_elements')
+            bg_elements_enabled = mode == 'bg_elements'
+            self.bg_el_edit.setEnabled(bg_elements_enabled)
+            self.bg_el_apply_btn.setEnabled(bg_elements_enabled)
             self._sync_background_mode_controls()
             self.update_plot(force_replot=True)
         except Exception as e:
@@ -1271,10 +1453,11 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
                 
                 # Automatically select "BG Spec (recommended)" mode when BG is loaded
                 self.fit_bg_combo.blockSignals(True)
-                self.fit_bg_combo.setCurrentIndex(1)  # BG Spec
+                self.fit_bg_combo.setCurrentIndex(2)  # BG Spec
                 self.fit_bg_combo.blockSignals(False)
                 self.session.set_bg_fit_mode('bg_spec')
                 self.bg_el_edit.setEnabled(False)  # Disable BG elements entry
+                self.bg_el_apply_btn.setEnabled(False)
                 self._sync_background_mode_controls()
                 self.update_plot(force_replot=True)
                 
