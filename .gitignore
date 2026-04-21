@@ -3,6 +3,7 @@ play_*.ipynb
 *.hspy
 check_deps.*
 test_*.py
+!tests/test_*.py
 *_SUMMARY.md
 build
 dist

@@ -16,7 +16,8 @@ sys.stderr = io.StringIO()
 import matplotlib
 import os
 import argparse
-from eds_session import EDSSession
+from pathlib import Path
+from eds_session import EDSSession, _dedupe_preferred_spectrum_paths
 
 # GUI imports - only used when not in auto mode, but needed for class definition
 try:
@@ -49,6 +50,35 @@ BACKGROUND_FIT_MODE_ITEMS = [
     ("bg_elements", "BG Elements"),
     ("bg_spec", "Ref BG Spec"),
 ]
+
+
+class SpectrumListWidget(QtWidgets.QListWidget if GUI_AVAILABLE else object):
+    def keyPressEvent(self, event):
+        if event.key() in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down):
+            row = self.currentRow()
+            if event.key() == QtCore.Qt.Key_Up and row > 0:
+                self.setCurrentRow(row - 1)
+                event.accept()
+                return
+            if event.key() == QtCore.Qt.Key_Down and row < self.count() - 1:
+                self.setCurrentRow(row + 1)
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+
+def collect_preferred_spectrum_paths(entries: List[str]) -> List[str]:
+    gathered: List[str] = []
+    for entry in entries:
+        if os.path.isfile(entry):
+            gathered.append(entry)
+            continue
+        root = Path(entry)
+        if not root.exists():
+            continue
+        for pattern in ('*.hspy', '*.eds'):
+            gathered.extend(str(path) for path in root.rglob(pattern))
+    return _dedupe_preferred_spectrum_paths(gathered)
 
 BACKGROUND_PREFIT_MODE_ITEMS = [
     ("off", "Off"),
@@ -169,7 +199,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         spectrum_layout.setContentsMargins(10, 14, 10, 10)
         spectrum_layout.setSpacing(8)
 
-        self.add_file_btn = QtWidgets.QPushButton("Add .eds File")
+        self.add_file_btn = QtWidgets.QPushButton("Add File")
         self.add_dir_btn = QtWidgets.QPushButton("Add Directory (recursive)")
         self.add_file_btn.clicked.connect(self.add_file)
         self.add_dir_btn.clicked.connect(self.add_directory)
@@ -182,13 +212,16 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         list_header.addWidget(self.spectrum_count_label)
         spectrum_layout.addLayout(list_header)
 
-        self.list = QtWidgets.QListWidget()
+        self.list = SpectrumListWidget()
         self.list.setAlternatingRowColors(True)
         self.list.setUniformItemSizes(True)
         self.list.setMinimumHeight(280)
         self.list.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        for name in self.session.records:
-            self.list.addItem(name)
+        self.list.setFocusPolicy(QtCore.Qt.StrongFocus)
+        for name, rec in self.session.records.items():
+            item = QtWidgets.QListWidgetItem(self._format_spectrum_list_label(rec))
+            item.setData(QtCore.Qt.UserRole, name)
+            self.list.addItem(item)
         self.list.currentRowChanged.connect(self.on_spectrum_changed)
 
         spectrum_body = QtWidgets.QHBoxLayout()
@@ -372,7 +405,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self.fit_lower_spin.setRange(0.0, 39.99)
         self.fit_lower_spin.setSingleStep(0.05)
         self.fit_lower_spin.setSuffix(" kV")
-        self.fit_lower_spin.setValue(self.session.active_record.fit_energy_min_keV if self.session.active_record else 0.1)
+        self.fit_lower_spin.setValue(self.session.active_record.fit_energy_min_keV if self.session.active_record else 0.2)
         self.fit_upper_spin = QtWidgets.QDoubleSpinBox()
         self.fit_upper_spin.setDecimals(2)
         self.fit_upper_spin.setRange(0.01, 40.0)
@@ -382,6 +415,14 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         fit_range_row.addWidget(self.fit_lower_spin)
         fit_range_row.addWidget(QtWidgets.QLabel("to"))
         fit_range_row.addWidget(self.fit_upper_spin)
+        fit_range_row.addSpacing(8)
+        fit_range_row.addWidget(QtWidgets.QLabel("Baseline order:"))
+        self.poly_order_spin = QtWidgets.QSpinBox()
+        self.poly_order_spin.setRange(1, 12)
+        self.poly_order_spin.setValue(
+            self.session.active_record.background_polynomial_order if self.session.active_record else 6
+        )
+        fit_range_row.addWidget(self.poly_order_spin)
         peak_advanced_layout.addLayout(fit_range_row)
 
         ignore_row = QtWidgets.QHBoxLayout()
@@ -397,6 +438,11 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         ignore_row.addWidget(self.ignore_sample_spin)
         ignore_row.addStretch()
         peak_advanced_layout.addLayout(ignore_row)
+        for i in range(ignore_row.count()):
+            item = ignore_row.itemAt(i)
+            widget = item.widget()
+            if widget is not None:
+                widget.setVisible(False)
 
         bg_prefit_row = QtWidgets.QHBoxLayout()
         bg_prefit_row.addWidget(QtWidgets.QLabel("BG prefit:"))
@@ -404,18 +450,18 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         for mode, label in BACKGROUND_PREFIT_MODE_ITEMS:
             self.bg_prefit_combo.addItem(label, mode)
         bg_prefit_row.addWidget(self.bg_prefit_combo, 1)
-        peak_advanced_layout.addLayout(bg_prefit_row)
-
-        poly_row = QtWidgets.QHBoxLayout()
-        poly_row.addWidget(QtWidgets.QLabel("Poly order:"))
-        self.poly_order_spin = QtWidgets.QSpinBox()
-        self.poly_order_spin.setRange(1, 12)
-        self.poly_order_spin.setValue(
-            self.session.active_record.background_polynomial_order if self.session.active_record else 6
+        bg_prefit_row.addSpacing(8)
+        bg_prefit_row.addWidget(QtWidgets.QLabel("Ignore sample ±"))
+        self.ignore_sample_spin = QtWidgets.QDoubleSpinBox()
+        self.ignore_sample_spin.setDecimals(2)
+        self.ignore_sample_spin.setRange(0.0, 2.0)
+        self.ignore_sample_spin.setSingleStep(0.05)
+        self.ignore_sample_spin.setSuffix(" kV")
+        self.ignore_sample_spin.setValue(
+            self.session.active_record.reference_bg_ignore_sample_half_width_keV if self.session.active_record else 0.2
         )
-        poly_row.addWidget(self.poly_order_spin)
-        poly_row.addStretch()
-        peak_advanced_layout.addLayout(poly_row)
+        bg_prefit_row.addWidget(self.ignore_sample_spin)
+        peak_advanced_layout.addLayout(bg_prefit_row)
 
         self.peak_sum_help_label = QtWidgets.QLabel("")
         self.peak_sum_help_label.setWordWrap(True)
@@ -530,6 +576,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self.fig = None
         self.ax = None
 
+        self._refresh_spectrum_list()
         # Set current row after all widgets are created
         self.list.setCurrentRow(0)
         
@@ -573,12 +620,18 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             self.bg_file_label.setText(f"{os.path.basename(bg_name)}")
         else:
             self.bg_file_label.setText("Reference BG loaded")
+
+    def _format_spectrum_list_label(self, rec):
+        if rec is None or rec.reduced_chisq is None:
+            return rec.name if rec is not None else ""
+        return f"{rec.name} [Fitted, χ²r: {rec.reduced_chisq:.2f}]"
         
     def on_spectrum_changed(self, idx):
         """Handle spectrum selection changes in the list."""
         if idx < 0 or idx >= self.list.count():
             return
-        name = self.list.item(idx).text()
+        item = self.list.item(idx)
+        name = item.data(QtCore.Qt.UserRole) or item.text()
         if self.session.active_name == name:
             return  # No change, skip recomputation
         self.session.set_active(name)
@@ -805,6 +858,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         # Always update elements, even if empty
         els = [e.strip() for e in self.el_edit.text().split(",") if e.strip()]
         self.session.set_elements(els)
+        self._refresh_spectrum_list()
         # session.set_elements should handle clearing elements for all records
         self.update_plot()
         # Update tables (they will be empty after element change)
@@ -873,6 +927,32 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self.popup_browser.setHtml(html)
         self.popup.show()
 
+    def _create_progress_dialog(self, title: str):
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setWindowIcon(QIcon(ICON_PATH))
+        dialog.setModal(False)
+        dialog.setWindowFlag(QtCore.Qt.WindowContextHelpButtonHint, False)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        label = QtWidgets.QLabel("Fitting in progress\n(see command window for details)")
+        label.setAlignment(QtCore.Qt.AlignCenter)
+        layout.addWidget(label)
+        dialog.setFixedSize(280, 100)
+        dialog.show()
+        QtWidgets.QApplication.processEvents()
+        return dialog
+
+    def _run_with_progress(self, title: str, callback):
+        dialog = self._create_progress_dialog(title)
+        try:
+            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+            QtWidgets.QApplication.processEvents()
+            return callback()
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            dialog.close()
+            QtWidgets.QApplication.processEvents()
+
     def _on_popup_link_clicked(self, qurl):
         element = qurl.toString()
         current_elements = [e.strip() for e in self.el_edit.text().split(",") if e.strip()]
@@ -926,12 +1006,13 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             else:
                 return  # User declined, abort fit
         
-        rec.fit_model()
+        self._run_with_progress("Fit Spectrum", rec.fit_model)
         # Always show global table, auto-check if needed
         if not self.show_fitted_table_checkbox.isChecked():
             self.show_fitted_table_checkbox.setChecked(True)
         else:
             self.show_fitted_intensity_table()
+        self._refresh_spectrum_list()
         self.update_plot(force_replot=True)
 
     def fit_spectrum_all(self):
@@ -956,18 +1037,20 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             else:
                 return  # User declined, abort fit
         
-        self.session.fit_all_models()
+        self._run_with_progress("Fit All Spectra", self.session.fit_all_models)
         # Always show global table, auto-check if needed
         if not self.show_fitted_table_checkbox.isChecked():
             self.show_fitted_table_checkbox.setChecked(True)
         else:
             self.show_fitted_intensity_table()
+        self._refresh_spectrum_list()
         self.update_plot(force_replot=True)
 
     def remove_fit_active(self):
         rec = self.session.active_record
         if rec is not None:
             rec.clear_fit()
+            self._refresh_spectrum_list()
             self.update_plot(force_replot=True)
             # Update the fitted table view if open
             if self.show_fitted_table_checkbox.isChecked():
@@ -976,6 +1059,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
     def remove_fit_all(self):
         for rec in self.session.records.values():
             rec.clear_fit()
+        self._refresh_spectrum_list()
         self.update_plot(force_replot=True)
         for title in list(self.table_views.keys()):
             if "Fitted Line Intensities" in title:
@@ -995,12 +1079,13 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             )
             return
         
-        rec.fine_tune_model()
+        self._run_with_progress("Fine-Tune Spectrum", rec.fine_tune_model)
         
         # Update fitted intensity table if visible
         if self.show_fitted_table_checkbox.isChecked():
             self.show_fitted_intensity_table()
         
+        self._refresh_spectrum_list()
         self.update_plot(force_replot=True)
     
     def fine_tune_all(self):
@@ -1014,7 +1099,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             return
 
         try:
-            self.session.apply_active_fine_tuning_to_all_models()
+            self._run_with_progress("Apply Fine-Tuning", self.session.apply_active_fine_tuning_to_all_models)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Apply Fine-Tuning Error", str(e))
             return
@@ -1023,6 +1108,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         if self.show_fitted_table_checkbox.isChecked():
             self.show_fitted_intensity_table()
         
+        self._refresh_spectrum_list()
         self.update_plot(force_replot=True)
 
     def _show_intensity_table(self, line_names, table_data, title="Line Intensities"):
@@ -1225,7 +1311,12 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self._show_intensity_table(line_names, table_data, title="Fitted Line Intensities")
 
     def add_file(self):
-        fname, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Add .eds File", "", "EDS Files (*.eds)")
+        fname, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Add Spectrum File",
+            "",
+            "Spectrum Files (*.hspy *.eds);;HyperSpy Files (*.hspy);;EDS Files (*.eds)",
+        )
         if fname:
             self.session.load([fname])
             self._refresh_spectrum_list()
@@ -1236,8 +1327,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
     def add_directory(self):
         dname = QtWidgets.QFileDialog.getExistingDirectory(self, "Add Directory")
         if dname:
-            from glob import glob
-            paths = glob(os.path.join(dname, '**', '*.eds'), recursive=True)
+            paths = collect_preferred_spectrum_paths([dname])
             if paths:
                 self.session.load(paths)
                 self._refresh_spectrum_list()
@@ -1248,7 +1338,8 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         idx = self.list.currentRow()
         if idx < 0 or idx >= self.list.count():
             return
-        name = self.list.item(idx).text()
+        item = self.list.item(idx)
+        name = item.data(QtCore.Qt.UserRole) or item.text()
         self.session.remove(name)
         self._refresh_spectrum_list()
         # Update plot and tables
@@ -1318,8 +1409,10 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
     def _refresh_spectrum_list(self):
         self.list.blockSignals(True)
         self.list.clear()
-        for name in self.session.records:
-            self.list.addItem(name)
+        for name, rec in self.session.records.items():
+            item = QtWidgets.QListWidgetItem(self._format_spectrum_list_label(rec))
+            item.setData(QtCore.Qt.UserRole, name)
+            self.list.addItem(item)
         # Select the new active spectrum if any
         if self.session.active_name and self.session.active_name in self.session.records:
             idx = list(self.session.records.keys()).index(self.session.active_name)
@@ -1417,6 +1510,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             self.bg_el_edit.setEnabled(bg_elements_enabled)
             self.bg_el_apply_btn.setEnabled(bg_elements_enabled)
             self._sync_background_mode_controls()
+            self._refresh_spectrum_list()
             self.update_plot(force_replot=True)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Fit BG Mode Error", str(e))
@@ -1432,6 +1526,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         try:
             self.session.set_bg_elements(elements)
             self._sync_background_mode_controls()
+            self._refresh_spectrum_list()
             self.update_plot(force_replot=True)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "BG Elements Error", str(e))
@@ -1444,7 +1539,10 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         if rec is not None and hasattr(rec, "path"):
             start_dir = os.path.dirname(rec.path)
         fname, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Open Reference Background Spectrum", start_dir, "EDS Files (*.eds)"
+            self,
+            "Open Reference Background Spectrum",
+            start_dir,
+            "Spectrum Files (*.hspy *.eds);;HyperSpy Files (*.hspy);;EDS Files (*.eds)",
         )
         if fname:
             try:
@@ -1469,24 +1567,17 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
                 QtWidgets.QMessageBox.warning(self, "Reference BG Error", str(e))
 
 def main():
-    from glob import glob
     p = argparse.ArgumentParser(description="EDS Spectrum Viewer")
-    p.add_argument("spectra", nargs="*", help="List of spectra files, or directories to search for .eds files")
+    p.add_argument("spectra", nargs="*", help="List of spectra files, or directories to search for .hspy/.eds files")
     p.add_argument("--elements", type=str, help="Comma‑separated element symbols (e.g. Fe,O,Cu)")
     p.add_argument("--bg-elements", type=str, help="Comma-separated background element symbols (e.g. Cu,Au,Cr)")
-    p.add_argument("--bg-spectrum", type=str, help="Path to background spectrum file (.eds)")
+    p.add_argument("--bg-spectrum", type=str, help="Path to background spectrum file (.hspy or .eds)")
     p.add_argument("--energy-resolution", type=float, default=128, help="Energy resolution FWHM at Mn Ka in eV (default: 128)")
     p.add_argument("--auto", action="store_true", help="Run automatic workflow without GUI: load spectra, compute intensities, export spectra/plots/table")
     p.add_argument("--max-energy", type=float, default=None, help="Maximum energy (keV) for plot range in auto mode")
     p.add_argument("--cps", action="store_true", help="Use counts per second (CPS) units instead of counts")
     args = p.parse_args()
-    paths = []
-    for p in args.spectra:
-        if os.path.isfile(p):
-            paths.append(p)
-        else:
-            paths.extend(glob(os.path.join(p,'**','*.eds'), recursive=True))
-            print(f"Found {len(paths)} .eds files in directory: {p}")
+    paths = collect_preferred_spectrum_paths(args.spectra)
     
     # if not paths:
     #     print("No spectra files provided. Please provide at least one .eds file or directory containing .eds files.")

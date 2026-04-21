@@ -2,8 +2,8 @@
 
 This directory contains the essential tests for the EDS Tool. These tests verify core functionality, performance, and correct behavior after code changes.
 
-**Last Updated**: 2026-04-20  
-**Total Tests**: 9 (8 automated + 1 manual GUI test)
+**Last Updated**: 2026-04-21  
+**Total Tests**: 10 (9 automated + 1 manual GUI test)
 
 ---
 
@@ -23,6 +23,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python test
 powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_refinement_stability.py
 powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_calibrate_includes_fit.py
 powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_param_locking.py
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_hspy_roundtrip.py
 
 # Manual GUI test (requires interaction)
 powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_fine_tune_gui.py
@@ -65,6 +66,33 @@ powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python test
 - `grain1_thin.eds`
 - `grain1_thick.eds`
 - `bg_near_grain1_thin.eds`
+
+---
+
+#### `test_hspy_roundtrip.py` ⭐
+
+**Purpose**: Verify that `.hspy` exports preserve EDS Tool fit state, restore it on load, and remain stable under re-fitting
+
+**What it tests**:
+- `.hspy` export writes the full EDS Tool record state into metadata
+- Loading a saved `.hspy` restores:
+  - fitted model
+  - reference background
+  - fit settings
+  - display / peak-sum source modes
+  - `χ²r`, offset, and resolution
+- A fresh `fit_model()` on the loaded `.hspy` reproduces the same fit result
+- When matching `.eds` and `.hspy` files exist, the loader prefers `.hspy`
+
+**When to Run**:
+- After changing `.hspy` export or load behavior
+- After changing model-state persistence
+- After changing path discovery / file-preference logic
+
+**Files Used**:
+- `grain1_thin.eds`
+- `bg_near_grain1_thin.eds`
+- temporary files under `tests/_tmp_hspy_roundtrip`
 
 ---
 

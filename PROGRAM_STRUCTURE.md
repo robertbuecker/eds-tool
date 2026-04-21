@@ -182,18 +182,26 @@ active_record: EDSSpectrumRecord       # Currently selected spectrum
 - That same `Advanced` section exposes fit-range controls:
   - lower / upper fit limits
   - `Ignore sample ±` for reference-BG shift refinement only
+- Current defaults are:
+  - fit range `0.2-40.0 keV`
+  - `BG prefit = Exclude sample`
+  - `Ignore sample ± = 0.2 keV`
+  - `Baseline order = 6`
 - The current GUI also exposes:
   - `BG prefit` (`Off`, `Exclude sample`, `BG el. only`)
-  - polynomial baseline order
+  - polynomial baseline order (`Baseline order`)
   - `Fit background` modes `None`, `BG Elements`, and `Ref BG Spec`
   - an `Apply` action that copies the active refined calibration to other already-fitted spectra and re-fits them
   - a `BG el.` display toggle for showing background-element markers on demand
+- The loaded-spectrum list can be navigated directly with `Up/Down` and now shows fit status inline, e.g. `[Fitted, χ²r: ...]`
+- Long-running fit/refine/apply actions remain synchronous, but the GUI now shows a small static progress dialog before entering the blocking call
 - When `Ref BG` is requested before any fit exists, the raw reference-BG spectrum is shown directly in CPS with the legend `Reference background (not fitted)`
 - The spectrum list is the primary stretch area because the common workflow is many loaded spectra with one active record
 - Initial navigator/plot window sizing is screen-aware rather than fixed, so the control pane can use more vertical space without breaking the side-by-side plot arrangement
 - Initial plot-window creation is deferred until the navigator's first real `showEvent`; doing it inside `__init__` caused unstable first-pass Qt layout in nested control groups
 - Raw/model HyperSpy plots now use the CPS-normalized fit signal; counts remain a signal-only view/export choice
 - The fitted-reference-BG-subtracted spectrum view still uses a live HyperSpy model plot by swapping the signal/model line callbacks to a background-subtracted space; the residual is unchanged because subtracting the same fitted reference BG from both signal and model cancels out
+- Plot legends are rebuilt explicitly as `Signal raw/background-corrected`, `Background`, `Fit`, and `Residual` as applicable
 
 ---
 
@@ -226,9 +234,22 @@ active_record: EDSSpectrumRecord       # Currently selected spectrum
 
 5. Export → Results saved
    - Spectrum (EMSA, CSV, etc.)
+   - `.hspy` analysis snapshots with serialized EDS Tool state
    - Plots (PNG, SVG, JPG)
    - Intensities (CSV)
 ```
+
+### `.hspy` Persistence
+
+- Exporting to `.hspy` saves the raw counts signal, not the current display view.
+- EDS Tool state is serialized into metadata and currently includes:
+  - fit/background settings
+  - current calibration and reset defaults
+  - embedded reference-BG signal payload
+  - fitted model parameter values / free flags / bounds
+  - display and peak-sum source modes
+- Loading one of these `.hspy` files reconstructs the fitted model and cached fitted-reference-BG products without immediately re-running a fit.
+- When matching `.eds` and `.hspy` files exist with the same basename, path discovery prefers `.hspy`.
 
 ### Element Management
 
