@@ -37,7 +37,7 @@ ICON_PATH = os.path.join(os.path.dirname(__file__), "eds_icon.png")
 # print(f"Icon path: {ICON_PATH}")
 
 # Configuration for auto workflow exports
-AUTO_SPECTRUM_FORMATS = ['emsa', 'csv']  # Formats for spectrum export
+AUTO_SPECTRUM_FORMATS = ['emsa', 'csv', 'hspy']  # Formats for spectrum export
 AUTO_PLOT_FORMATS = ['png', 'svg', 'jpg']  # Formats for plot export (BMP not supported by matplotlib)
 SIGNAL_MODE_ITEMS = [
     ("raw", "Raw"),
@@ -176,6 +176,10 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
     def __init__(self, session: EDSSession):
         super().__init__()
         self.session = session
+        self._default_element_hint_text = "Right-click the spectrum plot to add nearby X-ray lines."
+        self._pending_element_hint_text = "Click 'Apply' to re-fit with new elements."
+        self._element_preview_active = False
+        self._plot_click_cid = None
         self.setWindowTitle("EDS signals")
         self.setWindowIcon(QIcon(ICON_PATH))  # Set icon for navigator
         self.table_views: dict[str, QtWidgets.QDialog] = {}
@@ -261,7 +265,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self.export_all_btn.clicked.connect(self.export_all_spectra)
 
         self.ask_folder_checkbox = QtWidgets.QCheckBox("Ask for folder")
-        self.format_entry = QtWidgets.QLineEdit("emsa, csv")
+        self.format_entry = QtWidgets.QLineEdit("emsa, csv, hspy")
         self.ask_folder_checkbox.setMinimumHeight(22)
         self.format_entry.setMinimumHeight(26)
         spectrum_actions.addSpacing(4)
@@ -288,10 +292,10 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         setup_layout.addLayout(el_layout)
         el_apply.clicked.connect(self.apply_elements)
 
-        element_hint = QtWidgets.QLabel("Right-click the spectrum plot to add nearby X-ray lines.")
-        element_hint.setWordWrap(True)
-        element_hint.setStyleSheet("QLabel { color: #666; }")
-        setup_layout.addWidget(element_hint)
+        self.element_hint = QtWidgets.QLabel(self._default_element_hint_text)
+        self.element_hint.setWordWrap(True)
+        self.element_hint.setStyleSheet("QLabel { color: #666; }")
+        setup_layout.addWidget(self.element_hint)
 
         fit_bg_row = QtWidgets.QHBoxLayout()
         fit_bg_row.addWidget(QtWidgets.QLabel("Fit background:"))
@@ -360,12 +364,20 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self.fit_all_btn.clicked.connect(self.fit_spectrum_all)
 
         self.finetune_btn = QtWidgets.QPushButton("Refine")
-        self.finetune_all_btn = QtWidgets.QPushButton("Apply")
+        self.finetune_all_widget = QtWidgets.QWidget()
+        finetune_all_layout = QtWidgets.QHBoxLayout(self.finetune_all_widget)
+        finetune_all_layout.setContentsMargins(0, 0, 0, 0)
+        finetune_all_layout.setSpacing(6)
+        self.finetune_all_apply_btn = QtWidgets.QPushButton("Apply")
+        self.finetune_all_refine_btn = QtWidgets.QPushButton("Refine")
+        finetune_all_layout.addWidget(self.finetune_all_apply_btn)
+        finetune_all_layout.addWidget(self.finetune_all_refine_btn)
         fitting_grid.addWidget(QtWidgets.QLabel("Fine-tune"), 3, 0)
         fitting_grid.addWidget(self.finetune_btn, 3, 1)
-        fitting_grid.addWidget(self.finetune_all_btn, 3, 2)
+        fitting_grid.addWidget(self.finetune_all_widget, 3, 2)
         self.finetune_btn.clicked.connect(self.fine_tune_active)
-        self.finetune_all_btn.clicked.connect(self.fine_tune_all)
+        self.finetune_all_apply_btn.clicked.connect(self.fine_tune_all_apply)
+        self.finetune_all_refine_btn.clicked.connect(self.fine_tune_all_refine)
 
         self.remove_fit_btn = QtWidgets.QPushButton("Clear")
         self.remove_all_fit_btn = QtWidgets.QPushButton("Clear")
@@ -508,7 +520,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self.reset_zoom_btn = QtWidgets.QPushButton("Reset Zoom")
         self.reset_y_btn = QtWidgets.QPushButton("Reset Y")
         self.log_checkbox = QtWidgets.QCheckBox("Log")
-        self.signal_unit_label = QtWidgets.QLabel("Unit:")
+        self.signal_unit_label = QtWidgets.QLabel("")
         self.unit_counts_radio = QtWidgets.QRadioButton("cts")
         self.unit_cps_radio = QtWidgets.QRadioButton("cps")
         self.x_range_label = QtWidgets.QLabel("X lim:")
@@ -624,8 +636,18 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
     def _format_spectrum_list_label(self, rec):
         if rec is None or rec.reduced_chisq is None:
             return rec.name if rec is not None else ""
-        return f"{rec.name} [Fitted, χ²r: {rec.reduced_chisq:.2f}]"
+        return f"{rec.name} [χ²r: {rec.reduced_chisq:.2f}]"
         
+    def _get_preview_elements_override(self, rec=None):
+        rec = rec or self.session.active_record
+        if rec is None or not self._element_preview_active:
+            return None
+        return [e.strip() for e in self.el_edit.text().split(",") if e.strip()]
+
+    def _reset_element_preview(self):
+        self._element_preview_active = False
+        self.element_hint.setText(self._default_element_hint_text)
+
     def on_spectrum_changed(self, idx):
         """Handle spectrum selection changes in the list."""
         if idx < 0 or idx >= self.list.count():
@@ -639,6 +661,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         # Update elements fields
         self.el_edit.setText(",".join(self.session.active_record.elements))
         self.bg_el_edit.setText(",".join(self.session.active_record.bg_elements))
+        self._reset_element_preview()
         
         # Sync UI controls with record state
         rec = self.session.active_record
@@ -787,7 +810,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         with QtCore.QSignalBlocker(self.unit_cps_radio):
             self.unit_cps_radio.setChecked(effective_unit == "cps")
         if uses_model_plot:
-            self.signal_unit_label.setText("Unit:")
+            self.signal_unit_label.setText("")
             tooltip = (
                 "Model plots always use CPS because fitting and model diagnostics are normalized "
                 "to live time. Counts still apply to signal-only views, exports, and peak-sum intensities."
@@ -797,7 +820,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             self.residual_checkbox.setEnabled(True)
             self.residual_checkbox.setToolTip("")
         else:
-            self.signal_unit_label.setText("Unit:")
+            self.signal_unit_label.setText("")
             tooltip = ""
             self.unit_counts_radio.setEnabled(True)
             self.unit_cps_radio.setEnabled(True)
@@ -858,6 +881,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         # Always update elements, even if empty
         els = [e.strip() for e in self.el_edit.text().split(",") if e.strip()]
         self.session.set_elements(els)
+        self._reset_element_preview()
         self._refresh_spectrum_list()
         # session.set_elements should handle clearing elements for all records
         self.update_plot()
@@ -886,7 +910,8 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             fig=self.fig,
             show_residual=self.residual_checkbox.isChecked(),
             show_background=self.background_checkbox.isChecked(),
-            show_bg_elements=self.show_bg_elements_checkbox.isChecked()
+            show_bg_elements=self.show_bg_elements_checkbox.isChecked(),
+            display_elements_override=self._get_preview_elements_override(rec),
         )
         
         self.fig = fig
@@ -907,22 +932,39 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         
         # Connect right-click handler
         if fig is not None:
-            fig.canvas.mpl_connect("button_press_event", self._on_right_click)
+            if self._plot_click_cid is not None:
+                try:
+                    fig.canvas.mpl_disconnect(self._plot_click_cid)
+                except Exception:
+                    pass
+            self._plot_click_cid = fig.canvas.mpl_connect("button_press_event", self._on_right_click)
 
     def _on_right_click(self, event):
         if event.button == 3 and event.inaxes == self.ax and event.xdata is not None:
             energy = event.xdata
             lines = exspy.utils.eds.get_xray_lines_near_energy(energy, only_lines=['a', 'b'])
-            msg = "\n".join(lines)
-            self._show_lines_popup(energy, msg)
+            self._show_lines_popup(energy, lines)
 
-    def _show_lines_popup(self, energy, msg):
-        if msg:
-            html = "<br>".join(
-                f'<a href="{line.split("_")[0]}">{line}</a>' for line in msg.splitlines()
+    def _get_xray_line_distance(self, line, energy):
+        try:
+            element, family = line.split("_", 1)
+            line_energy = exspy.material.elements[element].Atomic_properties.Xray_lines.get_item(
+                f"{family}.energy_keV"
             )
-        else:
-            html = "No lines found."
+            return float(line_energy) - float(energy)
+        except Exception:
+            return None
+
+    def _show_lines_popup(self, energy, lines):
+        entries = []
+        for line in lines:
+            distance = self._get_xray_line_distance(line, energy)
+            if distance is None:
+                label = line
+            else:
+                label = f"{line} ({distance:+.2f} keV)"
+            entries.append(f'<a href="{line.split("_")[0]}">{label}</a>')
+        html = "<br>".join(entries) if entries else "No lines found."
         self.popup.setWindowTitle(f"X-ray lines near {energy:.2f} keV")
         self.popup_browser.setHtml(html)
         self.popup.show()
@@ -959,7 +1001,9 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         if element not in current_elements:
             current_elements.append(element)
             self.el_edit.setText(",".join(current_elements))
-            self.apply_elements()
+            self._element_preview_active = True
+            self.element_hint.setText(self._pending_element_hint_text)
+            self.update_plot(force_replot=True)
         self.popup.close()
 
     def compute_intensities_active(self):
@@ -1088,7 +1132,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self._refresh_spectrum_list()
         self.update_plot(force_replot=True)
     
-    def fine_tune_all(self):
+    def fine_tune_all_apply(self):
         """Apply the active spectrum's refined calibration to all fitted models."""
         rec = self.session.active_record
         if rec is None or rec.model is None:
@@ -1108,6 +1152,28 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         if self.show_fitted_table_checkbox.isChecked():
             self.show_fitted_intensity_table()
         
+        self._refresh_spectrum_list()
+        self.update_plot(force_replot=True)
+
+    def fine_tune_all_refine(self):
+        """Run per-spectrum refinement on all currently fitted spectra."""
+        fitted = [rec for rec in self.session.records.values() if rec.model is not None]
+        if not fitted:
+            QtWidgets.QMessageBox.warning(
+                self, "No Fitted Models",
+                "Please fit one or more spectra before refining all."
+            )
+            return
+
+        try:
+            self._run_with_progress("Refine All Spectra", self.session.fine_tune_all_models)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Refine All Error", str(e))
+            return
+
+        if self.show_fitted_table_checkbox.isChecked():
+            self.show_fitted_intensity_table()
+
         self._refresh_spectrum_list()
         self.update_plot(force_replot=True)
 
@@ -1372,7 +1438,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         # Parse formats from entry (split by comma or space)
         fmt_text = self.format_entry.text().strip()
         if not fmt_text:
-            formats = ["emsa", "csv"]
+            formats = ["emsa", "csv", "hspy"]
         else:
             # Split by comma or whitespace
             import re

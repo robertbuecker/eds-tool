@@ -46,30 +46,30 @@ The EDS Tool is a Python application for analyzing Energy-Dispersive X-ray Spect
 ### Three-Tier Design
 
 ```
-┌─────────────────────────────────────┐
-│  eds_tool.py (GUI Layer)           │
-│  - Qt GUI components                │
-│  - User interaction                 │
-│  - Visualization                    │
-└─────────────┬───────────────────────┘
-              │
-              ├─ uses
-              ↓
-┌─────────────────────────────────────┐
-│  eds_session.py (Business Logic)   │
-│  - EDSSession (multi-spectrum mgmt) │
-│  - EDSSpectrumRecord (single spec)  │
-│  - Fitting, calibration, export     │
-└─────────────┬───────────────────────┘
-              │
-              ├─ uses
-              ↓
-┌─────────────────────────────────────┐
-│  Library Layer                      │
-│  - HyperSpy (signal/model base)     │
-│  - exspy (EDS-specific models)      │
-│  - matplotlib (plotting)            │
-└─────────────────────────────────────┘
+Ã¢â€Å’Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€Â
+Ã¢â€â€š  eds_tool.py (GUI Layer)           Ã¢â€â€š
+Ã¢â€â€š  - Qt GUI components                Ã¢â€â€š
+Ã¢â€â€š  - User interaction                 Ã¢â€â€š
+Ã¢â€â€š  - Visualization                    Ã¢â€â€š
+Ã¢â€â€Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€Â¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€Ëœ
+              Ã¢â€â€š
+              Ã¢â€Å“Ã¢â€â‚¬ uses
+              Ã¢â€ â€œ
+Ã¢â€Å’Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€Â
+Ã¢â€â€š  eds_session.py (Business Logic)   Ã¢â€â€š
+Ã¢â€â€š  - EDSSession (multi-spectrum mgmt) Ã¢â€â€š
+Ã¢â€â€š  - EDSSpectrumRecord (single spec)  Ã¢â€â€š
+Ã¢â€â€š  - Fitting, calibration, export     Ã¢â€â€š
+Ã¢â€â€Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€Â¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€Ëœ
+              Ã¢â€â€š
+              Ã¢â€Å“Ã¢â€â‚¬ uses
+              Ã¢â€ â€œ
+Ã¢â€Å’Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€Â
+Ã¢â€â€š  Library Layer                      Ã¢â€â€š
+Ã¢â€â€š  - HyperSpy (signal/model base)     Ã¢â€â€š
+Ã¢â€â€š  - exspy (EDS-specific models)      Ã¢â€â€š
+Ã¢â€â€š  - matplotlib (plotting)            Ã¢â€â€š
+Ã¢â€â€Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€Ëœ
 ```
 
 ### Key Design Decisions
@@ -84,7 +84,7 @@ The EDS Tool is a Python application for analyzing Energy-Dispersive X-ray Spect
 
 ## Core Modules
 
-### `eds_session.py` — Core Business Logic
+### `eds_session.py` Ã¢â‚¬â€ Core Business Logic
 
 **Primary Classes**:
 
@@ -130,7 +130,7 @@ reference_bg_ignore_sample_half_width_keV: float  # Sample-line exclusion half-w
 ```
 
 **Key Methods**:
-- `set_elements(elements)` - Set sample elements, triggers refit if model exists
+- `set_elements(elements)` - Set sample elements; if a model exists, refit it and reuse the existing model object when possible
 - `set_bg_elements(elements)` - Set background elements
 - `fit_model()` - Fit model using current elements and background settings
 - `fine_tune_model()` - Calibrate energy offset and resolution
@@ -156,13 +156,15 @@ active_record: EDSSpectrumRecord       # Currently selected spectrum
 ```
 
 **Key Methods**:
-- `set_elements(elements)` - Set elements for all spectra
+- `set_elements(elements)` - Set elements for all spectra and batch-refit already fitted models
+  - In the GUI, right-click element picking is staged first: it updates the entry box and plot-line preview immediately, but only `Apply` triggers the batch refit
 - `set_background(path_or_signal)` - Load and apply background to all
-- `fit_all()` - Fit models for all spectra
-- `fine_tune_all()` - Fine-tune all fitted models
+- `fit_all_models()` - Fit models for all spectra
+- `fine_tune_all_models()` - Fine-tune all fitted models
+- `apply_active_fine_tuning_to_all_models()` - Apply the active refined calibration to other fitted models and re-fit them
 - `export_intensity_table()` - Export combined CSV table
 
-### `eds_tool.py` — GUI & CLI Interface
+### `eds_tool.py` - GUI & CLI Interface
 
 **Components**:
 - `NavigatorWidget` - Main window, spectrum list, controls
@@ -181,19 +183,21 @@ active_record: EDSSpectrumRecord       # Currently selected spectrum
 - Those derived-signal selectors act on the active spectrum only; they are not forced across every loaded record because fitted-reference views may be valid for one fitted spectrum while still unavailable for unfitted ones. The session only remembers them as defaults for future compatible records.
 - That same `Advanced` section exposes fit-range controls:
   - lower / upper fit limits
-  - `Ignore sample ±` for reference-BG shift refinement only
+  - `Ignore sample +/-` for reference-BG shift refinement only
 - Current defaults are:
   - fit range `0.2-40.0 keV`
   - `BG prefit = Exclude sample`
-  - `Ignore sample ± = 0.2 keV`
+  - `Ignore sample +/- = 0.2 keV`
   - `Baseline order = 6`
 - The current GUI also exposes:
   - `BG prefit` (`Off`, `Exclude sample`, `BG el. only`)
   - polynomial baseline order (`Baseline order`)
   - `Fit background` modes `None`, `BG Elements`, and `Ref BG Spec`
-  - an `Apply` action that copies the active refined calibration to other already-fitted spectra and re-fits them
+  - batch `Apply` and `Refine` actions:
+    - `Apply` copies the active refined calibration to other already-fitted spectra and re-fits them
+    - `Refine` runs per-spectrum refinement across all currently fitted spectra
   - a `BG el.` display toggle for showing background-element markers on demand
-- The loaded-spectrum list can be navigated directly with `Up/Down` and now shows fit status inline, e.g. `[Fitted, χ²r: ...]`
+- The loaded-spectrum list can be navigated directly with `Up/Down` and now shows fit quality inline, e.g. `[chi2r: 1.50]`
 - Long-running fit/refine/apply actions remain synchronous, but the GUI now shows a small static progress dialog before entering the blocking call
 - When `Ref BG` is requested before any fit exists, the raw reference-BG spectrum is shown directly in CPS with the legend `Reference background (not fitted)`
 - The spectrum list is the primary stretch area because the common workflow is many loaded spectra with one active record
@@ -202,6 +206,14 @@ active_record: EDSSpectrumRecord       # Currently selected spectrum
 - Raw/model HyperSpy plots now use the CPS-normalized fit signal; counts remain a signal-only view/export choice
 - The fitted-reference-BG-subtracted spectrum view still uses a live HyperSpy model plot by swapping the signal/model line callbacks to a background-subtracted space; the residual is unchanged because subtracting the same fitted reference BG from both signal and model cancels out
 - Plot legends are rebuilt explicitly as `Signal raw/background-corrected`, `Background`, `Fit`, and `Residual` as applicable
+- Batch execution is split by what actually dominates the runtime:
+  - `fit_all_models()` is intentionally sequential because HyperSpy/exspy model construction (`create_model()`) is dominated by SymPy-based Python work and deep-copy/slicing overhead, so threads serialize there under the GIL and processes are slower on Windows because they cold-import the full scientific stack
+  - `fine_tune_all_models()` still uses worker threads because it operates on already-built models and benefits from parallel numeric work
+  - session-level element or BG-element changes on already fitted spectra also use the threaded numeric path by updating models in place first and then re-fitting them without rebuilding from scratch
+  - refinement concurrency is capped separately from existing-model element refits:
+    - `DEFAULT_REFINE_ALL_MAX_WORKERS` controls fine-tuning worker count
+    - `DEFAULT_EXISTING_MODEL_REFIT_MAX_WORKERS` controls threaded re-fit after in-place model edits
+  - the helper that forces numexpr to one thread is protected by a global ref-counted lock because numexpr thread-count changes are process-global and were causing batch hangs when many refinements entered/exited concurrently
 
 ---
 
@@ -210,29 +222,29 @@ active_record: EDSSpectrumRecord       # Currently selected spectrum
 ### Spectrum Lifecycle
 
 ```
-1. Load → EDSSpectrumRecord created
+1. Load Ã¢â€ â€™ EDSSpectrumRecord created
    - Signal loaded via HyperSpy
    - Metadata parsed
    - Energy resolution set to 128 eV (default)
 
-2. Set Elements → Elements metadata updated
-   - If model exists → automatic refit triggered
+2. Set Elements Ã¢â€ â€™ Elements metadata updated
+   - If model exists Ã¢â€ â€™ automatic refit triggered
    
-3. Fit Model → Model created and fitted
+3. Fit Model Ã¢â€ â€™ Model created and fitted
    - Fit/model diagnostics operate on `_fit_signal` in CPS
    - Model type depends on bg_fit_mode
    - Intensities computed from fit
    - Chi-square calculated
    - External-background-only fitted signals cached
 
-4. Fine-Tune → Energy calibration applied
+4. Fine-Tune Ã¢â€ â€™ Energy calibration applied
    - Offset calibration
    - Reference-BG shift refinement (if applicable)
    - Resolution calibration (with locked parameters)
    - Stable-state selection via rebuilt candidate fits
    - Model and intensities updated
 
-5. Export → Results saved
+5. Export Ã¢â€ â€™ Results saved
    - Spectrum (EMSA, CSV, etc.)
    - `.hspy` analysis snapshots with serialized EDS Tool state
    - Plots (PNG, SVG, JPG)
@@ -267,7 +279,11 @@ active_record: EDSSpectrumRecord       # Currently selected spectrum
 **Element Change Behavior**:
 - Changing `elements` or `bg_elements` triggers automatic refit if model exists
 - Prevents model/element mismatch
-- Model object is recreated (new ID)
+- When a fitted model already exists, element changes now update that model in place:
+  - remove line families whose elements are no longer needed
+  - add missing line families with `add_family_lines()`
+  - keep background components, calibration, and fitted state of unchanged lines
+- Session-level element changes batch those in-place re-fits across already fitted records using the threaded numeric worker path
 
 ---
 
@@ -307,7 +323,7 @@ self._fit_signal.set_elements(sample_elements)
 - X-ray lines for background elements
 - Polynomial background
 
-#### Mode 2: `bg_fit_mode = 'bg_spec'` ⭐ **PREFERRED**
+#### Mode 2: `bg_fit_mode = 'bg_spec'` Ã¢Â­Â **PREFERRED**
 **Use case**: Have measured background spectrum (recommended for accuracy)
 
 ```python
@@ -336,7 +352,7 @@ self.model.fit()
 - `xscale` is fixed at 1.0 because floating it adds a costly nonlinear degree
   of freedom with negligible benefit for spectra on the same energy calibration.
 - More accurate for complex background shapes
-- Lower parameter count → faster fitting
+- Lower parameter count Ã¢â€ â€™ faster fitting
 
 ---
 
@@ -380,7 +396,7 @@ Total              | ~18 params | ~18   | *shift can be freed during fine-tuning
 - Most components don't use bounds by default
 - Background polynomial: no direct non-negativity regularization in the HyperSpy / exspy EDS model path
 - Resolution calibration: explicitly bounded to `127-130 eV` by bounding the reference line `sigma` during the locked resolution-calibration step
-- X-ray line intensities: Usually non-negative (≥0)
+- X-ray line intensities: Usually non-negative (Ã¢â€°Â¥0)
 
 ---
 
@@ -412,16 +428,16 @@ These control signal-only views/export and peak-sum intensities. They do not cha
 
 ### Legacy Compatibility Modes (`bg_correction_mode`)
 
-#### `'none'` — No External Background Subtraction
+#### `'none'` Ã¢â‚¬â€ No External Background Subtraction
 - Maps to `display_signal_mode = peak_sum_signal_mode = 'raw'`
 - Keeps the raw signal for signal-only views/export and peak summation
 
-#### `'subtract_spectra'` — Measured External Background Subtraction
+#### `'subtract_spectra'` Ã¢â‚¬â€ Measured External Background Subtraction
 - Maps to `display_signal_mode = peak_sum_signal_mode = 'measured_bg_subtracted'`
 - Subtracts the measured background with live-time normalization
 - Affects signal-only views/export and peak summation only
 
-#### `'subtract_fitted'` — Fitted Reference Background Subtraction
+#### `'subtract_fitted'` Ã¢â‚¬â€ Fitted Reference Background Subtraction
 - Maps to `display_signal_mode = peak_sum_signal_mode = 'fitted_reference_bg_subtracted'`
 - Subtracts only explicitly modeled reference-background components
 - Available for `bg_spec`
@@ -442,7 +458,7 @@ There is also a third explicit mode:
 Optional two-step background prefit is controlled separately through `background_prefit_mode`:
 
 - `'off'`: normal one-stage fit
-- `'exclude_sample'`: fit only the background stage first while excluding `Ignore sample ±` windows around sample lines, then freeze background and fit the rest
+- `'exclude_sample'`: fit only the background stage first while excluding `Ignore sample Ã‚Â±` windows around sample lines, then freeze background and fit the rest
 - `'bg_elements_only'`: in `bg_elements` mode with non-overlapping BG elements, fit the background stage only around BG-element windows, then freeze background and fit the rest
 
 ### CPS-First Model Path
@@ -452,14 +468,14 @@ Optional two-step background prefit is controlled separately through `background
 - Raw/model HyperSpy plots therefore operate in CPS
 - Counts remain available for signal-only views, export, and peak-sum intensities
 - Fit lower/upper limits apply to normal fits and energy-axis calibration
-- `Ignore sample ±` is narrower: it is only used during reference-BG shift refinement so sample peaks do not dominate the background-alignment step
+- `Ignore sample Ã‚Â±` is narrower: it is only used during reference-BG shift refinement so sample peaks do not dominate the background-alignment step
 
 **Recommendation**: Use `bg_fit_mode='bg_spec'` with raw CPS model diagnostics, and apply measured or fitted external subtraction only where a derived signal is actually needed.
 
 ### Fit Deletion Reset
 
 - `clear_fit()` is the canonical way to remove a fit.
-- It clears the model, fitted intensities, cached fitted reference-BG signals, and reduced `χ²ᵣ`.
+- It clears the model, fitted intensities, cached fitted reference-BG signals, and reduced `Ãâ€¡Ã‚Â²Ã¡ÂµÂ£`.
 - It also resets the fine-tuned calibration state:
   - energy offset
   - energy scale
@@ -473,11 +489,13 @@ Optional two-step background prefit is controlled separately through `background
 
 Fine-tuning corrects small energy axis shifts and incorrect detector resolution that cause visible residuals after initial fitting.
 
-**Updated behavior (2026-04-20)**:
-- Resolution calibration is now hard-bounded to `127-130 eV`.
-- The bound is enforced on the reference alpha-line `sigma` used by exspy's detector-resolution model, with warnings when the fit hits either bound.
-- `fine_tune_model()` keeps the live refined model; it does not run a final blind free fit.
-- Later `fit_model()` calls rebuild on the refined calibration and stay numerically stable instead of blowing up to very large `chi2r`.
+**Updated behavior (2026-04-21)**:
+- Resolution calibration is hard-bounded through the reference alpha-line `sigma` used by exspy's detector-resolution model, with warnings when the fit hits either bound.
+- The current code bounds detector resolution to `127-132 eV`.
+- `fine_tune_model()` now ends with a constrained post-calibration fit that re-solves amplitudes, baseline, and reference-BG scale while keeping the calibrated offset, reference-BG shift, and resolution fixed.
+- The original free/fixed/twin structure is restored after fine-tuning; only the calibrated offset, reference-BG shift, and detector resolution persist as state changes.
+- The reference-BG-shift step reports a masked BG-window chi-square, not the full-spectrum model chi-square.
+- Re-running fine-tuning on an unchanged model can still drive the resolution step into a different bound-constrained basin; the implementation therefore keeps the pre-refinement model state as a baseline candidate and restores it if the full fitted model gets worse.
 
 ### Problem
 
@@ -487,24 +505,26 @@ Even after good initial fits, residuals often show:
 
 These cause poor chi-square even when element selection is correct.
 
-### Solution: Sequential Calibration
+### Solution: Sequential Calibration Plus Restricted Postfit
 
 ```python
 def fine_tune_model(self):
     """
-    Candidate calibration process:
+    Current refinement process:
     1. Offset calibration (all params free)
     2. Background shift refinement (bg_spec mode only)
     3. Resolution calibration (LOCKED PARAMS for speed)
-    4. Rebuild/evaluate each candidate and keep the best stable state
+    4. Constrained post-calibration refit
+    5. Restore the original model structure
     """
 ```
 
-The docstring sketch above is now partially historical. The current implementation is:
+The current implementation is:
 1. offset calibration
 2. reference-BG shift refinement where applicable
-3. bounded resolution calibration inside `127-130 eV`
-4. keep the resulting live refined model and use later `fit_model()` rebuilds for stable follow-up work
+3. bounded resolution calibration
+4. constrained post-calibration fit with energies, widths, and BG shift fixed
+5. keep the resulting live refined model and use later `fit_model()` rebuilds for stable follow-up work
 
 ### Step-by-Step Algorithm
 
@@ -526,8 +546,8 @@ self.model.calibrate_energy_axis(calibrate='offset')
 **Observed on the `acac` multi-spectrum dataset**:
 ```
 After offset calibration:
-  Offset: 0.001914 keV (Δ = +4.07 eV)
-  χ²ᵣ: 615.61 (Δ = -131.42, -17.6%)
+  Offset: 0.001914 keV (ÃŽâ€ = +4.07 eV)
+  Ãâ€¡Ã‚Â²Ã¡ÂµÂ£: 615.61 (ÃŽâ€ = -131.42, -17.6%)
 ```
 
 #### Step 2: Background Shift Refinement
@@ -542,8 +562,8 @@ After offset calibration:
 - Fits the background alignment against otherwise fixed peak/background parameters
 - Useful when background and sample spectra have a small relative offset
 - Respects the fit lower/upper limits
-- Can exclude `± ignore_sample_half_width` around sample lines so the reference-BG alignment focuses on background-dominated regions
-#### Step 3: Energy Resolution Calibration ⭐ **KEY OPTIMIZATION**
+- Can exclude `Ã‚Â± ignore_sample_half_width` around sample lines so the reference-BG alignment focuses on background-dominated regions
+#### Step 3: Energy Resolution Calibration Ã¢Â­Â **KEY OPTIMIZATION**
 **Goal**: Adjust detector resolution to match line widths
 
 **Problem**: If all 20 parameters are free, this step takes ~77 seconds and hits maxfev warnings!
@@ -576,8 +596,8 @@ for param in locked_params:
 **Example output**:
 ```
 After resolution calibration (with locked parameters):
-  Resolution: 126.53 eV (Δ = -1.47 eV)
-  χ²ᵣ: 585.38 (Δ = -30.23, -4.9%)
+  Resolution: 126.53 eV (ÃŽâ€ = -1.47 eV)
+  Ãâ€¡Ã‚Â²Ã¡ÂµÂ£: 585.38 (ÃŽâ€ = -30.23, -4.9%)
 ```
 
 **Critical**: Without parameter locking, this step is 20-25x slower and can freeze the GUI!
@@ -594,15 +614,17 @@ best_state = min(candidate_states, key=rebuilt_chisq)
 
 **What it does**:
 - Rebuilds a fresh model for each candidate calibration state
-- Compares rebuilt `χ²ᵣ`, not just the transient calibration-stage `χ²ᵣ`
+- Compares rebuilt `Ãâ€¡Ã‚Â²Ã¡ÂµÂ£`, not just the transient calibration-stage `Ãâ€¡Ã‚Â²Ã¡ÂµÂ£`
 - Rejects unstable resolution-calibration states that look good only before rebuild
 - Leaves the record in a robust fitted state for later element changes / re-fits
 
 **Example output**:
 ```
 After final refinement fit:
-  χ²ᵣ: 560.47 (Δ = -24.92, -4.3%)
+  Ãâ€¡Ã‚Â²Ã¡ÂµÂ£: 560.47 (ÃŽâ€ = -24.92, -4.3%)
 ```
+
+Historical note: the old Step 4 candidate-selection description above is no longer the live implementation. The current fine-tuning path now performs a constrained post-calibration refit with only X-ray amplitudes, polynomial background coefficients, and `instrument.yscale` free while keeping the calibrated offset, resolution, and reference-BG shift fixed, and then restores the original free/fixed/twin model structure. This is what makes a single fine-tuning pass effective on difficult spectra such as `acac/exp_7985.EDS` and `acac/exp_7987.EDS`.
 
 ### Overall Performance
 
@@ -620,7 +642,7 @@ Total improvement: ~25% chi-square reduction
 
 **Without parameter locking**:
 ```
-Fine-tuning:     ~85 seconds (14.2x) ❌ SLOW
+Fine-tuning:     ~85 seconds (14.2x) Ã¢ÂÅ’ SLOW
   - Offset calib:         ~4s
   - Resolution calib:    ~77s (maxfev warnings)
   - Final fit:            ~1s
@@ -630,10 +652,10 @@ Fine-tuning:     ~85 seconds (14.2x) ❌ SLOW
 
 **Insight**: During resolution calibration, we're only adjusting the width of X-ray lines, not their positions or relative intensities. Therefore:
 
-- ✅ **Resolution parameter must be free**: That's what we're calibrating
-- ❌ **Element intensities should be locked**: Relative peak heights don't change
-- ❌ **Background coefficients should be locked**: Background shape doesn't significantly change
-- ❌ **Offset should be locked**: Already calibrated in step 1
+- Ã¢Å“â€¦ **Resolution parameter must be free**: That's what we're calibrating
+- Ã¢ÂÅ’ **Element intensities should be locked**: Relative peak heights don't change
+- Ã¢ÂÅ’ **Background coefficients should be locked**: Background shape doesn't significantly change
+- Ã¢ÂÅ’ **Offset should be locked**: Already calibrated in step 1
 
 **Result**: Resolution calibration becomes a ~1-parameter optimization instead of a 20-parameter optimization.
 
@@ -645,9 +667,9 @@ Fine-tuning:     ~85 seconds (14.2x) ❌ SLOW
 
 3. **Stable-state selection matters**: Offset is still first. Reference-BG shift refinement comes next when applicable. Resolution calibration is treated as a candidate, not blindly accepted.
 
-4. **Transient vs stable chi-square**: A calibration stage can report a better transient `χ²ᵣ` and still be unusable after rebuild. The code therefore compares rebuilt fits, not just the transient calibration result.
+4. **Transient vs stable chi-square**: A calibration stage can report a better transient `Ãâ€¡Ã‚Â²Ã¡ÂµÂ£` and still be unusable after rebuild. The code therefore compares rebuilt fits, not just the transient calibration result.
 
-3. **Order matters**: Offset → Resolution → Offset sequence was tested. Final approach uses Offset → Resolution only, with final refinement fit.
+3. **Order matters**: Offset Ã¢â€ â€™ Resolution Ã¢â€ â€™ Offset sequence was tested. Final approach uses Offset Ã¢â€ â€™ Resolution only, with final refinement fit.
 
 4. **Chi-square may increase after resolution calibration**: Before final refinement fit, chi-square might temporarily be worse. The final fit brings it down.
 
@@ -673,7 +695,7 @@ Fine-tuning:     ~85 seconds (14.2x) ❌ SLOW
 ### Constants
 
 ```python
-AUTO_SPECTRUM_FORMATS = ['emsa', 'csv']
+AUTO_SPECTRUM_FORMATS = ['emsa', 'csv', 'hspy']
 AUTO_PLOT_FORMATS = ['png', 'svg', 'jpg']
 ```
 
@@ -803,7 +825,7 @@ class MyWidget(QtWidgets.QWidget):
 
 ### Optimization Strategies
 
-#### 1. Parameter Locking During Calibration ⭐ **CRITICAL**
+#### 1. Parameter Locking During Calibration Ã¢Â­Â **CRITICAL**
 **Impact**: 25x speedup for resolution calibration  
 **Implementation**: See [Fine-Tuning Algorithm](#fine-tuning-algorithm)
 
@@ -883,7 +905,7 @@ python tests/test_fine_tune_timing.py
 ```
 Initial fit took: ~1.4s
 Fine-tune took: ~1.4s (1.0x)
-✓ Fine-tuning time is reasonable (1.0x initial fit time)
+Ã¢Å“â€œ Fine-tuning time is reasonable (1.0x initial fit time)
 ```
 
 **Warning signs**:
@@ -917,20 +939,89 @@ Fine-tune took: ~1.4s (1.0x)
 
 **Key Takeaways for Agents**:
 
-1. ✅ **Business logic in** `eds_session.py`, **GUI in** `eds_tool.py`
-2. ✅ **Lock parameters during resolution calibration** - critical for performance
-3. ✅ **Default energy resolution is 128 eV** (not HyperSpy's 133 eV)
-4. ✅ **Use bg_spec mode** with ScalableFixedPattern when possible
-5. ✅ **Fix `instrument.xscale` at 1.0** - it adds costly nonlinearity with negligible benefit
-6. ✅ **Keep `instrument.shift` fixed during the initial fit** - refine it only during fine-tuning if needed
-7. ✅ **Force `numexpr` to 1 thread during EDS fitting** - default multithreading is much slower for 4k-channel spectra
-8. ✅ **Changing elements triggers auto-refit** - prevents model/element mismatch
-9. ✅ **Fine-tuning should stay in the same order of magnitude as the initial fit** - use timing tests to verify
-10. ✅ **Calibration methods include fitting** - explicit fit() calls are optional but help
-11. ✅ **exspy doesn't auto-lock parameters** - must do manually
+1. Ã¢Å“â€¦ **Business logic in** `eds_session.py`, **GUI in** `eds_tool.py`
+2. Ã¢Å“â€¦ **Lock parameters during resolution calibration** - critical for performance
+3. Ã¢Å“â€¦ **Default energy resolution is 128 eV** (not HyperSpy's 133 eV)
+4. Ã¢Å“â€¦ **Use bg_spec mode** with ScalableFixedPattern when possible
+5. Ã¢Å“â€¦ **Fix `instrument.xscale` at 1.0** - it adds costly nonlinearity with negligible benefit
+6. Ã¢Å“â€¦ **Keep `instrument.shift` fixed during the initial fit** - refine it only during fine-tuning if needed
+7. Ã¢Å“â€¦ **Force `numexpr` to 1 thread during EDS fitting** - default multithreading is much slower for 4k-channel spectra
+8. Ã¢Å“â€¦ **Changing elements triggers auto-refit** - prevents model/element mismatch
+9. Ã¢Å“â€¦ **Fine-tuning should stay in the same order of magnitude as the initial fit** - use timing tests to verify
+10. Ã¢Å“â€¦ **Calibration methods include fitting** - explicit fit() calls are optional but help
+11. Ã¢Å“â€¦ **exspy doesn't auto-lock parameters** - must do manually
 
 **Most Critical Code Section**: Fine-tuning parameter locking (see lines 236-320 in `eds_session.py`)
 
-**Most Common Pitfall**: Forgetting to lock parameters during resolution calibration → 25x performance degradation
+**Most Common Pitfall**: Forgetting to lock parameters during resolution calibration Ã¢â€ â€™ 25x performance degradation
 
 **Performance Verification**: Run `test_fine_tune_timing.py` after any changes to fitting/calibration code
+
+---
+
+## Standalone Fitting Protocol Investigation
+
+There is now a dedicated standalone investigation script:
+
+- [tests/explore_fitting_protocols.py](/c:/Users/robert.buecker/codes/eds-tool/tests/explore_fitting_protocols.py:1)
+
+This exists because the in-app fitting path had accumulated enough branching and
+stateful edge handling that it became hard to reason about the fitting protocol
+itself from GUI behavior alone.
+
+### What It Does
+
+- loads sample and reference-background spectra directly with HyperSpy
+- builds exactly one live exSpy model per case
+- snapshots and restores that model using `model.store()` /
+  `signal.models.restore()`
+- compares explicit refinement orderings step by step
+- records:
+  - `chi2r`
+  - offset
+  - fitted `energy_resolution_MnKa`
+  - reference-BG shift / scale
+  - baseline drift from the actual polynomial curve
+  - runtime
+  - nested `model.fit()` calls triggered inside calibration helpers
+
+### Current Best Protocol
+
+The strongest refinement route found so far is:
+
+1. Initial bounded fit with width fixed at `128 eV`
+2. Overall offset calibration
+3. Bounded linear re-fit
+4. Reference-BG shift-only masked fit
+5. Bounded linear re-fit
+6. Locked one-parameter width fit
+7. Candidate search over width-line groups, including a `skip width` option
+
+This is cleaner than repeated blind refine cycles and avoids the major failure
+mode seen in earlier versions: a broad nonlinear width fit absorbing baseline or
+reference-background errors.
+
+### exSpy Helper Limitations Found
+
+With the current model shape (polynomial baseline + `ScalableFixedPattern`
+reference background), the standalone investigation found that:
+
+- `fit_background()` is not directly usable
+- `fix_xray_lines_energy()` / `fix_xray_lines_width()` are only safe through
+  explicit x-ray-line paths, not the default `"all"` path
+- `calibrate_energy_axis(calibrate='resolution')` cannot be used directly
+  because its final width-to-energy-resolution update walks non-line components
+
+So the standalone script still uses official HyperSpy/exSpy model objects, but
+reimplements the line-only width update path explicitly where the built-in
+helper currently breaks.
+
+### Detailed Results
+
+Detailed notes are in:
+
+- [FITTING_TESTS.md](/c:/Users/robert.buecker/codes/eds-tool/FITTING_TESTS.md:1)
+
+Validated CSV / JSON output bundle from the April 2026 run:
+
+- [tests/fitting_protocol_outputs/20260422_full_search/all_protocol_summary.csv](/c:/Users/robert.buecker/codes/eds-tool/tests/fitting_protocol_outputs/20260422_full_search/all_protocol_summary.csv:1)

@@ -2,6 +2,9 @@ import os
 import sys
 import io
 import warnings
+import traceback
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from pathlib import Path
 from typing import List, Dict, Optional, Any
@@ -20,6 +23,11 @@ except ImportError:  # pragma: no cover - HyperSpy falls back to numpy without n
     numexpr = None
 
 
+_NUMEXPR_THREAD_LOCK = threading.Lock()
+_NUMEXPR_THREAD_USERS = 0
+_NUMEXPR_PREVIOUS_THREADS = None
+
+
 @contextmanager
 def _small_signal_numexpr():
     """
@@ -31,21 +39,31 @@ def _small_signal_numexpr():
         yield
         return
 
-    previous_threads = numexpr.set_num_threads(1)
     try:
+        global _NUMEXPR_THREAD_USERS, _NUMEXPR_PREVIOUS_THREADS
+        with _NUMEXPR_THREAD_LOCK:
+            if _NUMEXPR_THREAD_USERS == 0:
+                _NUMEXPR_PREVIOUS_THREADS = numexpr.set_num_threads(1)
+            _NUMEXPR_THREAD_USERS += 1
         yield
     finally:
-        numexpr.set_num_threads(previous_threads)
+        with _NUMEXPR_THREAD_LOCK:
+            _NUMEXPR_THREAD_USERS -= 1
+            if _NUMEXPR_THREAD_USERS == 0:
+                numexpr.set_num_threads(_NUMEXPR_PREVIOUS_THREADS)
+                _NUMEXPR_PREVIOUS_THREADS = None
 
 
 RESOLUTION_MIN_EV = 127.0
-RESOLUTION_MAX_EV = 130.0
+RESOLUTION_MAX_EV = 132.0
 BACKGROUND_WINDOW_SIGMA = (4.0, 3.0)
 DEFAULT_FIT_MIN_KEV = 0.2
 DEFAULT_FIT_MAX_KEV = 40.0
 DEFAULT_IGNORE_SAMPLE_HALF_WIDTH_KEV = 0.2
 DEFAULT_BACKGROUND_PREFIT_MODE = 'exclude_sample'
 DEFAULT_BACKGROUND_POLYNOMIAL_ORDER = 6
+DEFAULT_REFINE_ALL_MAX_WORKERS = 8
+DEFAULT_EXISTING_MODEL_REFIT_MAX_WORKERS = 4
 EDS_TOOL_STATE_KEY = 'EDS_Tool.state'
 EDS_TOOL_STATE_VERSION = 1
 
@@ -71,6 +89,7 @@ def _dedupe_preferred_spectrum_paths(paths: List[str]) -> List[str]:
         if Path(path).suffix.lower() == '.hspy':
             preferred[key] = str(path)
     return list(preferred.values())
+
 
 class EDSSpectrumRecord:
     def __init__(self, path: str):
@@ -319,6 +338,7 @@ class EDSSpectrumRecord:
                 'resolution': float(self.get_energy_resolution(self._fit_signal)),
             },
             'settings': {
+                'elements': list(self.elements),
                 'signal_unit': self.signal_unit,
                 'display_signal_mode': self.display_signal_mode,
                 'peak_sum_signal_mode': self.peak_sum_signal_mode,
@@ -341,8 +361,7 @@ class EDSSpectrumRecord:
             return obj.as_dictionary()
         return obj
 
-    def _restore_from_saved_state_if_present(self):
-        state = self._tree_to_dict(self._signal.metadata.get_item(EDS_TOOL_STATE_KEY, default=None))
+    def _apply_serialized_state(self, state: Dict):
         if not isinstance(state, dict):
             return
 
@@ -352,6 +371,10 @@ class EDSSpectrumRecord:
         self._default_energy_resolution = float(defaults.get('resolution', self._default_energy_resolution))
 
         settings = state.get('settings', {})
+        elements = list(settings.get('elements', self.elements))
+        if elements != self.elements:
+            self._signal.set_elements(elements)
+            self._fit_signal.set_elements(elements)
         self.bg_elements = list(settings.get('bg_elements', self.bg_elements))
         self.bg_fit_mode = settings.get('bg_fit_mode', self.bg_fit_mode)
         self.background_prefit_mode = settings.get('background_prefit_mode', self.background_prefit_mode)
@@ -365,6 +388,8 @@ class EDSSpectrumRecord:
         self.bg_file = settings.get('bg_file', self.bg_file)
 
         background_payload = self._tree_to_dict(state.get('background_signal'))
+        self._background = None
+        self._background_fit_signal = None
         if isinstance(background_payload, dict):
             self.set_background(self._deserialize_signal_payload(background_payload))
 
@@ -375,23 +400,37 @@ class EDSSpectrumRecord:
             scale=current.get('scale'),
             resolution=current.get('resolution'),
         )
+        self._sync_fit_signal_from_raw()
         self._set_signal_calibration(
             self._fit_signal,
             offset=current.get('offset'),
             scale=current.get('scale'),
             resolution=current.get('resolution'),
         )
-        self._sync_fit_signal_from_raw()
 
         self.signal_unit = settings.get('signal_unit', self.signal_unit)
         self.display_signal_mode = settings.get('display_signal_mode', self.display_signal_mode)
         self.peak_sum_signal_mode = settings.get('peak_sum_signal_mode', self.peak_sum_signal_mode)
         self._sync_legacy_bg_correction_mode()
 
+        self.model = None
+        self.fitted_intensities = None
+        self.fitted_reference_clean_signal = None
+        self.fitted_reference_bg_signal = None
+        self.signal_clean = None
+        self.signal_bg = None
+        self.reduced_chisq = None
+
         fit_state = self._tree_to_dict(state.get('fit_state'))
         if isinstance(fit_state, dict):
             self._restore_saved_model(fit_state)
         self._refresh_display_signal_cache()
+
+    def _restore_from_saved_state_if_present(self):
+        state = self._tree_to_dict(self._signal.metadata.get_item(EDS_TOOL_STATE_KEY, default=None))
+        if not isinstance(state, dict):
+            return
+        self._apply_serialized_state(state)
 
     def _restore_saved_model(self, fit_state):
         original_elements = self.elements.copy()
@@ -669,6 +708,61 @@ class EDSSpectrumRecord:
         model.add_polynomial_background(order=self.background_polynomial_order)
         return model
 
+    def _desired_model_elements(self, sample_elements: Optional[List[str]] = None) -> List[str]:
+        desired = list(sample_elements if sample_elements is not None else self.elements)
+        if self.bg_fit_mode == 'bg_elements':
+            for element in self.bg_elements:
+                if element not in desired:
+                    desired.append(element)
+        return desired
+
+    def _update_existing_model_elements_inplace(self):
+        if self.model is None:
+            raise ValueError("No existing model available for in-place element update")
+
+        desired_model_elements = self._desired_model_elements()
+        self._fit_signal.set_elements(desired_model_elements)
+        self.model.signal.set_elements(desired_model_elements)
+
+        removable = []
+        for component in list(self.model):
+            if getattr(component, 'isbackground', False):
+                continue
+            if self._component_element(component) not in desired_model_elements:
+                removable.append(component)
+        if removable:
+            self.model.remove(removable)
+
+        self.model.add_family_lines()
+        self._restore_model_state_hygiene()
+
+    def _fit_prepared_model(self):
+        prefit_info = self._run_background_prefit()
+        if prefit_info.get('used'):
+            message = prefit_info['description']
+            if 'scale' in prefit_info:
+                print(
+                    f"{message}... Scale: {prefit_info['scale']:.4f}, "
+                    f"Shift: {prefit_info['shift']:.6f} keV, "
+                    f"chi2r: {prefit_info['chi2r']:.2f}"
+                )
+            else:
+                print(f"{message}... chi2r: {prefit_info['chi2r']:.2f}")
+        fit_kwargs = {} if prefit_info.get('used') else {'optimizer': 'lstsq'}
+        with _small_signal_numexpr():
+            with self._temporary_model_signal_range(self.model):
+                self.model.fit(**fit_kwargs)
+        self.fitted_intensities = self.model.get_lines_intensity()
+        print(f"Fitting element lines and polynomial baseline... chi2r: {float(self.model.red_chisq.data):.2f}")
+        if hasattr(self.model, 'red_chisq'):
+            chisq_data = self.model.red_chisq.data
+            self.reduced_chisq = float(chisq_data) if hasattr(chisq_data, '__float__') else float(chisq_data.item())
+        else:
+            self.reduced_chisq = None
+        self._compute_fitted_signals()
+        self._sync_raw_signal_from_fit()
+        self._refresh_display_signal_cache()
+
     def _iter_background_stage_components(self):
         if self.model is None:
             return []
@@ -694,6 +788,19 @@ class EDSSpectrumRecord:
 
     def _background_prefit_enabled(self) -> bool:
         return self.background_prefit_mode in ('exclude_sample', 'bg_elements_only')
+
+    def _capture_free_states(self):
+        if self.model is None:
+            return {}
+        return {
+            param: param.free
+            for component in self.model
+            for param in component.parameters
+        }
+
+    def _restore_free_states(self, free_states):
+        for param, was_free in free_states.items():
+            param.free = was_free
 
     def _warn(self, message: str):
         warnings.warn(message, RuntimeWarning, stacklevel=2)
@@ -1001,7 +1108,7 @@ class EDSSpectrumRecord:
             # Restore stderr
             sys.stderr = stderr_backup
 
-    def set_elements(self, elements: List[str]):
+    def set_elements(self, elements: List[str], refit_if_needed: bool = True, reuse_existing_model: bool = True):
         if elements != self.elements:
             had_model = self.model is not None
             self._signal.set_elements(elements)
@@ -1010,12 +1117,13 @@ class EDSSpectrumRecord:
             self._refresh_display_signal_cache()
             
             # If a model existed, refit it with new elements instead of just deleting
-            if had_model:
+            if had_model and refit_if_needed:
                 print(f"Refitting model for {self.name} with updated elements...")
-                self.fit_model()
+                self.fit_model(rebuild_model=not reuse_existing_model)
             else:
-                self.model = None
-                self.fitted_intensities = None
+                if not had_model:
+                    self.model = None
+                    self.fitted_intensities = None
 
     def compute_intensities(self):
         """
@@ -1053,6 +1161,7 @@ class EDSSpectrumRecord:
         for component in self.model:
             if self._is_xray_line_component(component):
                 component.sigma.bmin = 0.0
+
 
     def _seed_model_from_previous(self, previous_model):
         if self.model is None or previous_model is None:
@@ -1097,7 +1206,7 @@ class EDSSpectrumRecord:
             self._restore_default_calibration()
         self._refresh_display_signal_cache()
 
-    def fit_model(self):
+    def fit_model(self, rebuild_model: bool = True):
         """
         Fit the model based on bg_fit_mode:
         - 'none': Sample elements + polynomial baseline only
@@ -1110,71 +1219,44 @@ class EDSSpectrumRecord:
             original_elements = self.elements.copy()
             fit_signal = self.get_signal_for_fit()
             
-            if self.bg_fit_mode == 'none':
-                self.model = self._make_model(fit_signal, original_elements)
+            if rebuild_model or self.model is None:
+                if self.bg_fit_mode == 'none':
+                    self.model = self._make_model(fit_signal, original_elements)
 
-            elif self.bg_fit_mode == 'bg_elements':
-                # Mode 1: Add BG elements to the model
-                all_elements = original_elements + self.bg_elements
-                self.model = self._make_model(fit_signal, all_elements)
-                
-            elif self.bg_fit_mode == 'bg_spec':
-                # Mode 2: Use ScalableFixedPattern with background spectrum
-                if self._background is None:
-                    raise ValueError(f"Background spectrum required for bg_fit_mode='bg_spec' but none loaded")
-                
-                # Create model with only sample elements
-                self.model = self._make_model(fit_signal, original_elements)
-                
-                # Add ScalableFixedPattern component for instrument background
-                comp_bg = hs.model.components1D.ScalableFixedPattern(self._background_fit_signal)
-                comp_bg.name = 'instrument'
-                comp_bg.isbackground = True
-                # Instrument/background spectra should share the same energy calibration.
-                # Letting xscale float makes the whole fit nonlinear with negligible benefit.
-                comp_bg.xscale.free = False
-                # Keep the background shift fixed during the initial fit.
-                # If needed, fine_tune_model() can refine it later.
-                comp_bg.shift.free = False
-                comp_bg.shift.value = self.reference_bg_shift
-                self.model.append(comp_bg)
-                self.model.background_components.append(comp_bg)
-            else:
-                raise ValueError(f"Unknown bg_fit_mode: {self.bg_fit_mode}")
+                elif self.bg_fit_mode == 'bg_elements':
+                    self.model = self._make_model(fit_signal, self._desired_model_elements(original_elements))
 
-            self._seed_model_from_previous(previous_model)
-            
-            # With fixed line positions/widths and fixed reference-BG shift/xscale,
-            # these EDS fits are linear in amplitudes and polynomial terms.
-            prefit_info = self._run_background_prefit()
-            if prefit_info.get('used'):
-                message = prefit_info['description']
-                if 'scale' in prefit_info:
-                    print(
-                        f"{message}... Scale: {prefit_info['scale']:.4f}, "
-                        f"Shift: {prefit_info['shift']:.6f} keV, "
-                        f"chi2r: {prefit_info['chi2r']:.2f}"
-                    )
+                elif self.bg_fit_mode == 'bg_spec':
+                    # Mode 2: Use ScalableFixedPattern with background spectrum
+                    if self._background is None:
+                        raise ValueError(f"Background spectrum required for bg_fit_mode='bg_spec' but none loaded")
+
+                    # Create model with only sample elements
+                    self.model = self._make_model(fit_signal, original_elements)
+
+                    # Add ScalableFixedPattern component for instrument background
+                    comp_bg = hs.model.components1D.ScalableFixedPattern(self._background_fit_signal)
+                    comp_bg.name = 'instrument'
+                    comp_bg.isbackground = True
+                    # Instrument/background spectra should share the same energy calibration.
+                    # Letting xscale float makes the whole fit nonlinear with negligible benefit.
+                    comp_bg.xscale.free = False
+                    # Keep the background shift fixed during the initial fit.
+                    # If needed, fine_tune_model() can refine it later.
+                    comp_bg.shift.free = False
+                    comp_bg.shift.value = self.reference_bg_shift
+                    self.model.append(comp_bg)
+                    self.model.background_components.append(comp_bg)
                 else:
-                    print(f"{message}... chi2r: {prefit_info['chi2r']:.2f}")
-            fit_kwargs = {} if prefit_info.get('used') else {'optimizer': 'lstsq'}
-            with _small_signal_numexpr():
-                with self._temporary_model_signal_range(self.model):
-                    self.model.fit(**fit_kwargs)
-            self._restore_model_state_hygiene()
-            self.fitted_intensities = self.model.get_lines_intensity()
-            
-            # Compute reduced chi-square (extract scalar from array if needed)
-            if hasattr(self.model, 'red_chisq'):
-                chisq_data = self.model.red_chisq.data
-                self.reduced_chisq = float(chisq_data) if hasattr(chisq_data, '__float__') else float(chisq_data.item())
+                    raise ValueError(f"Unknown bg_fit_mode: {self.bg_fit_mode}")
+
+                self._seed_model_from_previous(previous_model)
             else:
-                self.reduced_chisq = None
-            if self.reduced_chisq is not None:
-                print(f"Fitting element lines and polynomial baseline... chi2r: {self.reduced_chisq:.2f}")
+                if self.bg_fit_mode == 'bg_spec' and self._background is None:
+                    raise ValueError(f"Background spectrum required for bg_fit_mode='bg_spec' but none loaded")
+                self._update_existing_model_elements_inplace()
             
-            # Pre-compute clean and background signals for efficiency
-            self._compute_fitted_signals()
+            self._fit_prepared_model()
             
             # Restore original elements if we added bg_elements
             if self.bg_fit_mode == 'bg_elements':
@@ -1183,7 +1265,7 @@ class EDSSpectrumRecord:
             self._sync_raw_signal_from_fit()
 
             self._refresh_display_signal_cache()
-                
+                 
         except Exception as e:
             print(f"Warning: Could not fit model for {self.name}: {e}")
             self.clear_fit(reset_calibration=False)
@@ -1205,12 +1287,9 @@ class EDSSpectrumRecord:
         if instrument is None:
             return None, None
 
-        previously_free = []
-        for component in self.model:
-            for param in component.parameters:
-                if param.free:
-                    previously_free.append(param)
-                    param.free = False
+        previous_free_states = self._capture_free_states()
+        for param in previous_free_states:
+            param.free = False
 
         instrument.shift.free = True
         instrument.yscale.free = True
@@ -1223,18 +1302,50 @@ class EDSSpectrumRecord:
                 ):
                     self.model.fit()
         finally:
-            for param in previously_free:
-                param.free = True
-            instrument.shift.free = False
+            self._restore_free_states(previous_free_states)
 
         bg_shift = instrument.shift.value
         chisq = float(self.model.red_chisq.data.item() if hasattr(self.model.red_chisq.data, 'item') else self.model.red_chisq.data)
         print(
             f"Fitting reference background shift... {bg_shift:.6f} keV "
             f"(delta = {(bg_shift - initial_bg_shift) * 1000:+.2f} eV). "
-            f"chi2r: {chisq:.2f}"
+            f"masked BG-window chi2r: {chisq:.2f}"
         )
         return bg_shift, chisq
+
+    def _run_post_calibration_refit(self, restore_free_states):
+        """
+        Re-fit amplitudes, baseline, and reference-BG scale after calibration
+        while keeping the calibrated energy offset, reference-BG shift, and
+        resolution fixed.
+        """
+        if self.model is None:
+            return None
+
+        try:
+            for param in restore_free_states:
+                param.free = False
+
+            for component in self.model:
+                if self._is_xray_line_component(component) and hasattr(component, 'A') and component.A.twin is None:
+                    component.A.free = True
+                elif component.name == 'instrument':
+                    component.yscale.free = True
+                    component.shift.free = False
+                    component.xscale.free = False
+                elif getattr(component, 'isbackground', False):
+                    component.set_parameters_free()
+
+            with _small_signal_numexpr():
+                with self._temporary_model_signal_range(self.model):
+                    self.model.fit()
+        finally:
+            self._restore_free_states(restore_free_states)
+            self._restore_model_state_hygiene()
+
+        chisq = float(self.model.red_chisq.data.item() if hasattr(self.model.red_chisq.data, 'item') else self.model.red_chisq.data)
+        print(f"Re-fitting amplitudes, baseline, and reference BG scale... chi2r: {chisq:.2f}")
+        return chisq
     
     def _fine_tune_model_legacy(self):
         """
@@ -1348,6 +1459,8 @@ class EDSSpectrumRecord:
 
         try:
             fit_signal = self.get_signal_for_fit()
+            initial_free_states = self._capture_free_states()
+            initial_state = self._serialize_state()
             initial_chisq = float(self.model.red_chisq.data.item() if hasattr(self.model.red_chisq.data, 'item') else self.model.red_chisq.data)
             initial_offset = fit_signal.axes_manager[-1].offset
             initial_resolution = fit_signal.metadata.Acquisition_instrument.TEM.Detector.EDS.energy_resolution_MnKa
@@ -1410,12 +1523,11 @@ class EDSSpectrumRecord:
                 chisq_3 = chisq_2
                 resolution_2 = initial_resolution
 
-            # Step 4: rebuild a fresh model on the calibrated signal so the
-            # post-refinement state remains robust for later re-fits.
-            self._restore_model_state_hygiene()
-            if instrument is not None:
-                instrument.shift.free = False
-                self.reference_bg_shift = instrument.shift.value
+            # Step 4: solve amplitudes/background again with the calibrated
+            # offset, reference-BG shift, and width held fixed.
+            chisq_4 = self._run_post_calibration_refit(initial_free_states)
+            if chisq_4 is None:
+                chisq_4 = chisq_3
 
             self.fitted_intensities = self.model.get_lines_intensity()
             if hasattr(self.model, 'red_chisq'):
@@ -1426,12 +1538,30 @@ class EDSSpectrumRecord:
             self._compute_fitted_signals()
             self._sync_raw_signal_from_fit()
             final_chisq = self.reduced_chisq if self.reduced_chisq is not None else chisq_3
+            restored_initial_state = False
             if abs(final_chisq - chisq_3) > 0.01:
-                print(f"\nAfter keeping live refined fit:")
-                print(f"  chi2r: {final_chisq:.2f} (delta = {final_chisq - chisq_3:.2f}, {((final_chisq / chisq_3 - 1) * 100):.1f}%)")
+                print(
+                    f"After constrained post-calibration fit... chi2r: {final_chisq:.2f} "
+                    f"(delta = {final_chisq - chisq_3:+.2f}, {self._format_delta_percent(final_chisq, chisq_3)})"
+                )
+
+            if final_chisq >= initial_chisq - 1e-6:
+                print(
+                    f"Refinement candidate rejected... final chi2r {final_chisq:.2f} "
+                    f"is not better than the starting chi2r {initial_chisq:.2f}. Restoring previous model state."
+                )
+                self._apply_serialized_state(initial_state)
+                fit_signal = self.get_signal_for_fit()
+                self._restore_model_state_hygiene()
+                final_chisq = self.reduced_chisq if self.reduced_chisq is not None else initial_chisq
+                restored_initial_state = True
 
             final_resolution = fit_signal.metadata.Acquisition_instrument.TEM.Detector.EDS.energy_resolution_MnKa
             final_offset = fit_signal.axes_manager[-1].offset
+            if not restored_initial_state:
+                self._restore_free_states(initial_free_states)
+            self._restore_model_state_hygiene()
+            instrument = self._get_instrument_component()
             final_bg_shift = self.reference_bg_shift if instrument is not None else None
             total_offset_change = (final_offset - initial_offset) * 1000
             total_resolution_change = final_resolution - initial_resolution
@@ -1506,6 +1636,7 @@ class EDSSpectrumRecord:
         show_residual: bool = True,
         show_background: bool = False,
         show_bg_elements: bool = False,
+        display_elements_override: Optional[List[str]] = None,
         **kwargs
     ):
         # Save axis limits if ax is supplied
@@ -1528,7 +1659,14 @@ class EDSSpectrumRecord:
         
         # Determine which elements to show
         # In bg_elements mode with a fit, show all elements (sample + bg)
-        elements_to_show = self.get_all_elements_for_display(include_bg_elements=show_bg_elements)
+        if display_elements_override is None:
+            elements_to_show = self.get_all_elements_for_display(include_bg_elements=show_bg_elements)
+        else:
+            elements_to_show = list(display_elements_override)
+            if show_bg_elements:
+                for element in self.bg_elements:
+                    if element not in elements_to_show:
+                        elements_to_show.append(element)
         show_lines = bool(elements_to_show)
         
         # Temporarily set elements for display if in bg_elements mode with fit
@@ -1680,14 +1818,14 @@ class EDSSpectrumRecord:
         self.set_display_signal_mode(mode)
         self.set_peak_sum_signal_mode(mode)
     
-    def set_bg_elements(self, elements: List[str]):
+    def set_bg_elements(self, elements: List[str], refit_if_needed: bool = True, reuse_existing_model: bool = True):
         """Set background elements (used in bg_elements fit mode)."""
         if elements != self.bg_elements:
             self.bg_elements = elements
             # If a fit exists and we're in bg_elements mode, refit with new BG elements
-            if self.model is not None and self.bg_fit_mode == 'bg_elements':
+            if self.model is not None and self.bg_fit_mode == 'bg_elements' and refit_if_needed:
                 print(f"Refitting model for {self.name} with updated BG elements...")
-                self.fit_model()
+                self.fit_model(rebuild_model=not reuse_existing_model)
             else:
                 self._compute_fitted_signals()
                 self._refresh_display_signal_cache()
@@ -1830,8 +1968,14 @@ class EDSSession:
         print(f"Intensity table exported to: {filepath}")
 
     def set_elements(self, elements: List[str]):
+        to_refit = []
         for rec in self.records.values():
-            rec.set_elements(elements)
+            had_model = rec.model is not None
+            rec.set_elements(elements, refit_if_needed=False)
+            if had_model:
+                to_refit.append(rec)
+        if to_refit:
+            self._run_records_in_parallel('refit_existing_model', to_refit)
     
     def set_energy_resolution(self, resolution_ev: float):
         """Set the energy resolution (FWHM at Mn Ka) for all spectra in eV."""
@@ -1849,15 +1993,69 @@ class EDSSession:
         for rec in self.records.values():
             rec.compute_intensities()
 
+    def _run_records_in_parallel(self, task: str, records: List[EDSSpectrumRecord]):
+        if not records:
+            return
+        if task == 'fit':
+            # HyperSpy/exspy EDS model creation is dominated by SymPy-based
+            # expression compilation and deepcopy/slicing work inside
+            # `create_model()`. That stage is effectively GIL-bound, so
+            # thread-based parallelism serializes there and appears to "hang",
+            # while process-based parallelism on Windows is even worse because
+            # every worker must cold-import the full scientific stack.
+            # Until model-template reuse is implemented, plain sequential
+            # fitting is the most reliable and fastest path for batch fits.
+            for rec in records:
+                rec.fit_model()
+            return
+        if len(records) == 1:
+            rec = records[0]
+            if task == 'refine' and rec.model is not None:
+                rec.fine_tune_model()
+            elif task == 'refit_existing_model' and rec.model is not None:
+                rec.fit_model(rebuild_model=False)
+            return
+
+        worker_cap = (
+            DEFAULT_REFINE_ALL_MAX_WORKERS
+            if task == 'refine'
+            else DEFAULT_EXISTING_MODEL_REFIT_MAX_WORKERS
+        )
+        max_workers = min(len(records), os.cpu_count() or 1, worker_cap)
+        if max_workers <= 1:
+            for rec in records:
+                if task == 'refine' and rec.model is not None:
+                    rec.fine_tune_model()
+                elif task == 'refit_existing_model' and rec.model is not None:
+                    rec.fit_model(rebuild_model=False)
+            return
+
+        def _run_local(rec: EDSSpectrumRecord):
+            try:
+                if task == 'refine' and rec.model is not None:
+                    rec.fine_tune_model()
+                elif task == 'refit_existing_model' and rec.model is not None:
+                    rec.fit_model(rebuild_model=False)
+                return {'record': rec, 'error': None}
+            except Exception:
+                return {
+                    'record': rec,
+                    'error': traceback.format_exc(),
+                }
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_run_local, rec) for rec in records]
+            for future in as_completed(futures):
+                result = future.result()
+                if result.get('error'):
+                    raise RuntimeError(result['error'])
+
     def fit_all_models(self):
-        for rec in self.records.values():
-            rec.fit_model()
+        self._run_records_in_parallel('fit', list(self.records.values()))
     
     def fine_tune_all_models(self):
         """Fine-tune all fitted models in the session."""
-        for rec in self.records.values():
-            if rec.model is not None:
-                rec.fine_tune_model()
+        self._run_records_in_parallel('refine', [rec for rec in self.records.values() if rec.model is not None])
 
     def apply_active_fine_tuning_to_all_models(self):
         source = self.active_record
@@ -1868,6 +2066,7 @@ class EDSSession:
         resolution = source.get_energy_resolution()
         reference_bg_shift = source.reference_bg_shift
 
+        targets = []
         for rec in self.records.values():
             if rec is source or rec.model is None:
                 continue
@@ -1875,8 +2074,11 @@ class EDSSession:
                 offset=offset,
                 resolution=resolution,
                 reference_bg_shift=reference_bg_shift,
-                refit_model=True,
+                refit_model=False,
             )
+            targets.append(rec)
+
+        self._run_records_in_parallel('fit', targets)
 
     def get_intensity_table(self, fitted=False) -> List[Dict]:
         table = []
@@ -1989,8 +2191,14 @@ class EDSSession:
     
     def set_bg_elements(self, elements: List[str]):
         """Set background elements for all records."""
+        to_refit = []
         for rec in self.records.values():
-            rec.set_bg_elements(elements)
+            should_refit = rec.model is not None and rec.bg_fit_mode == 'bg_elements'
+            rec.set_bg_elements(elements, refit_if_needed=False)
+            if should_refit:
+                to_refit.append(rec)
+        if to_refit:
+            self._run_records_in_parallel('refit_existing_model', to_refit)
     
     def set_bg_fit_mode(self, mode: str):
         """

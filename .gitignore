@@ -12,3 +12,4 @@ __pycache__
 .numba_cache
 .tmp
 .numba_cache
+tests/fitting_protocol_outputs
