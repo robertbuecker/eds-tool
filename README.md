@@ -25,22 +25,10 @@ export of spectra and fit state.
 
 ## Running the Program
 
-From the repository, run Python through the `eds-mini` wrapper:
+Run:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python eds_tool.py grain1_thin.eds
-```
-
-Load multiple spectra and a reference background:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python eds_tool.py acac --elements C,O,Fe,Al,Ga,Ge,N --bg-spectrum acac\near_7994.EDS
-```
-
-Run automatic non-GUI export:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python eds_tool.py grain1_thin.eds --elements C,O,Na,S,Si,K,Cu --bg-spectrum bg_near_grain1_thin.eds --auto
+eds_tool.py [-h] [--elements ELEMENTS] [--bg-elements BG_ELEMENTS] [--bg-spectrum BG_SPECTRUM] [--energy-resolution ENERGY_RESOLUTION][--auto] [--max-energy MAX_ENERGY] [--cps] [spectra ...]
 ```
 
 Useful CLI options:
@@ -221,7 +209,6 @@ Check the command-window output:
 - Verify the element list. Extra elements are allowed, but absent low-energy
   elements can still make interpretation harder.
 - Use `Ref BG Spec` when a measured background spectrum is available.
-- Keep `instrument.xscale` fixed; it is not a useful GUI control.
 
 ### Fit quality is poor between peaks
 
@@ -271,17 +258,3 @@ operation runs; detailed progress is printed in the command window.
 
 This is intentional when both files exist with the same stem. `.hspy` may
 contain saved EDS Tool fit state.
-
-## Development Notes
-
-Architecture and implementation details are in:
-
-- `PROGRAM_STRUCTURE.md`
-- `FITTING_TESTS.md`
-- `tests/TESTS.md`
-
-Run tests with:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_fit_protocol_module.py
-```

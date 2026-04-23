@@ -13,3 +13,8 @@ __pycache__
 .tmp
 .numba_cache
 tests/fitting_protocol_outputs
+dist-cx
+*.egg-info
+*.csv
+*.emsa
+*.hspy

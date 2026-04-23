@@ -19,7 +19,7 @@
             "args": [
                 "C:\\XcaliburData\\EDS-test\\AlFeGa-acac-1\\exp_7990\\exp_7990.EDS",
                 "C:\\XcaliburData\\EDS-test\\AlFeGa-acac-1\\exp_7991\\exp_7991.EDS",
-                "--elements","Fe,Cu,Au,Cr,C,N,O,Al,Ga"
+                "--elements","Fe,Cu,Au,Cr,C,N,O,Al,Ga,F,S"
             ],
             "console": "integratedTerminal"
         },
@@ -42,7 +42,7 @@
             "program": "eds_tool.py",
             "args": [
                 "grain1_thin.eds",
-                "--elements","Na,S,K,Si,Cu,C,O,Cl",
+                "--elements","Na,S,K,Si,Cu,C,O,Cl,Ca",
                 "--bg-elements", "Cu,Au,Cr,Sn,Fe,Si,C,Nb,Mo",
                 "--bg-spectrum", "bg_near_grain1_thin.eds"
             ],
@@ -54,25 +54,13 @@
             "request": "launch",
             "program": "eds_tool.py",
             "args": [
-                "acac\\*.eds",
-                "--elements","C",
+                "acac",
+                "--elements","C,O,Fe,Al,Ga,Ge,N",
                 "--bg-elements", "Cu,Au,Cr,Sn,Fe,Si,C,Nb,Mo",
                 "--bg-spectrum", "acac\\near_7994.EDS"
             ],
             "console": "integratedTerminal"
         },        
-        {
-            "name": "EDS tool (whole series)",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "eds_tool.py",
-            "args": [
-                "acac",
-                "--elements","Fe,Cu,Au,Cr,C,N,O,Al,Ga",
-                "--bg-spectrum", "C:\\XcaliburData\\EDS-test\\AlFeGa-acac-1\\spectra_only\\near_7994.EDS"
-            ],
-            "console": "integratedTerminal"
-        },
         {
             "name": "EDS tool (no files)",
             "type": "debugpy",
