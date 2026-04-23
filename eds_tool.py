@@ -80,12 +80,6 @@ def collect_preferred_spectrum_paths(entries: List[str]) -> List[str]:
             gathered.extend(str(path) for path in root.rglob(pattern))
     return _dedupe_preferred_spectrum_paths(gathered)
 
-BACKGROUND_PREFIT_MODE_ITEMS = [
-    ("off", "Off"),
-    ("exclude_sample", "Exclude sample"),
-    ("bg_elements_only", "BG el. only"),
-]
-
 def auto_workflow(session: EDSSession, max_energy: Optional[float] = None, use_cps: bool = False):
     """
     Automatic workflow for EDS analysis without GUI.
@@ -438,32 +432,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         peak_advanced_layout.addLayout(fit_range_row)
 
         ignore_row = QtWidgets.QHBoxLayout()
-        ignore_row.addWidget(QtWidgets.QLabel("Ignore sample ±"))
-        self.ignore_sample_spin = QtWidgets.QDoubleSpinBox()
-        self.ignore_sample_spin.setDecimals(2)
-        self.ignore_sample_spin.setRange(0.0, 2.0)
-        self.ignore_sample_spin.setSingleStep(0.05)
-        self.ignore_sample_spin.setSuffix(" kV")
-        self.ignore_sample_spin.setValue(
-            self.session.active_record.reference_bg_ignore_sample_half_width_keV if self.session.active_record else 0.0
-        )
-        ignore_row.addWidget(self.ignore_sample_spin)
-        ignore_row.addStretch()
-        peak_advanced_layout.addLayout(ignore_row)
-        for i in range(ignore_row.count()):
-            item = ignore_row.itemAt(i)
-            widget = item.widget()
-            if widget is not None:
-                widget.setVisible(False)
-
-        bg_prefit_row = QtWidgets.QHBoxLayout()
-        bg_prefit_row.addWidget(QtWidgets.QLabel("BG prefit:"))
-        self.bg_prefit_combo = QtWidgets.QComboBox()
-        for mode, label in BACKGROUND_PREFIT_MODE_ITEMS:
-            self.bg_prefit_combo.addItem(label, mode)
-        bg_prefit_row.addWidget(self.bg_prefit_combo, 1)
-        bg_prefit_row.addSpacing(8)
-        bg_prefit_row.addWidget(QtWidgets.QLabel("Ignore sample ±"))
+        ignore_row.addWidget(QtWidgets.QLabel("Ignore sample +/-"))
         self.ignore_sample_spin = QtWidgets.QDoubleSpinBox()
         self.ignore_sample_spin.setDecimals(2)
         self.ignore_sample_spin.setRange(0.0, 2.0)
@@ -472,8 +441,9 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self.ignore_sample_spin.setValue(
             self.session.active_record.reference_bg_ignore_sample_half_width_keV if self.session.active_record else 0.2
         )
-        bg_prefit_row.addWidget(self.ignore_sample_spin)
-        peak_advanced_layout.addLayout(bg_prefit_row)
+        ignore_row.addWidget(self.ignore_sample_spin)
+        ignore_row.addStretch()
+        peak_advanced_layout.addLayout(ignore_row)
 
         self.peak_sum_help_label = QtWidgets.QLabel("")
         self.peak_sum_help_label.setWordWrap(True)
@@ -487,7 +457,6 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self.fit_lower_spin.valueChanged.connect(self._on_fit_range_changed)
         self.fit_upper_spin.valueChanged.connect(self._on_fit_range_changed)
         self.ignore_sample_spin.valueChanged.connect(self._on_ignore_sample_changed)
-        self.bg_prefit_combo.currentIndexChanged.connect(self._on_bg_prefit_mode_changed)
         self.poly_order_spin.valueChanged.connect(self._on_poly_order_changed)
 
         self.display_group = QtWidgets.QGroupBox("Display and Tables")
@@ -735,37 +704,16 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self._set_signal_mode_combo_state(self.peak_sum_mode_combo, rec.peak_sum_signal_mode, peak_enabled_modes)
         self.peak_sum_help_label.setText(self._get_peak_sum_mode_help_text(rec))
 
-    def _get_peak_sum_mode_help_text(self, rec):
-        if rec is None:
-            return ""
-        if rec.bg_fit_mode == 'bg_elements' and rec.has_bg_element_overlap():
-            return (
-                "Fitted reference BG is unavailable in BG Elements mode when "
-                "background elements overlap the sample elements."
-            )
-        if rec.model is None:
-            return (
-                "Fit a model to enable fitted reference BG. "
-                "Measured subtraction requires a loaded reference BG."
-            )
-        if rec.bg_fit_mode == 'bg_spec' and rec._background is None:
-            return "Load a reference BG to enable BG Spec modeling and measured subtraction."
-        return (
-            "Peak-sum source only affects get_lines_intensity(). BG prefit runs a two-step fit. "
-            "Ignore sample +/- affects BG prefit and reference-BG shift refinement."
-        )
-
     def _sync_fit_controls(self, rec=None):
         rec = rec or self.session.active_record
         if rec is None:
             return
-        with QtCore.QSignalBlocker(self.fit_lower_spin), QtCore.QSignalBlocker(self.fit_upper_spin), QtCore.QSignalBlocker(self.ignore_sample_spin), QtCore.QSignalBlocker(self.bg_prefit_combo), QtCore.QSignalBlocker(self.poly_order_spin):
+        with QtCore.QSignalBlocker(self.fit_lower_spin), QtCore.QSignalBlocker(self.fit_upper_spin), QtCore.QSignalBlocker(self.ignore_sample_spin), QtCore.QSignalBlocker(self.poly_order_spin):
             self.fit_lower_spin.setMaximum(max(0.0, rec.fit_energy_max_keV - 0.01))
             self.fit_upper_spin.setMinimum(rec.fit_energy_min_keV + 0.01)
             self.fit_lower_spin.setValue(rec.fit_energy_min_keV)
             self.fit_upper_spin.setValue(rec.fit_energy_max_keV)
             self.ignore_sample_spin.setValue(rec.reference_bg_ignore_sample_half_width_keV)
-            self.bg_prefit_combo.setCurrentIndex(self.bg_prefit_combo.findData(rec.background_prefit_mode))
             self.poly_order_spin.setValue(rec.background_polynomial_order)
 
     def _on_fit_range_changed(self):
@@ -784,13 +732,6 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             self.session.set_reference_bg_ignore_sample_half_width(self.ignore_sample_spin.value())
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Ignore Range Error", str(e))
-            self._sync_fit_controls()
-
-    def _on_bg_prefit_mode_changed(self):
-        try:
-            self.session.set_background_prefit_mode(self.bg_prefit_combo.currentData())
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "BG Prefit Error", str(e))
             self._sync_fit_controls()
 
     def _on_poly_order_changed(self):
@@ -860,13 +801,6 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         xaxis = plot_signal.axes_manager.signal_axes[0]
         requested = float(self.x_range_combo.currentData())
         return min(xaxis.high_value, requested)
-
-    def _update_fitting_group_title(self, rec=None):
-        rec = rec or self.session.active_record
-        if rec is None or rec.reduced_chisq is None:
-            self.fitting_group.setTitle("Fitting and Quantification")
-        else:
-            self.fitting_group.setTitle(f"Fitting and Quantification (χ²ᵣ: {rec.reduced_chisq:.4f})")
 
     def _update_fitting_group_title(self, rec=None):
         rec = rec or self.session.active_record

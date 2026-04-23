@@ -1,732 +1,277 @@
 # EDS Tool Test Suite
 
-This directory contains the essential tests for the EDS Tool. These tests verify core functionality, performance, and correct behavior after code changes.
+This file documents the current automated and manual tests. Use the
+`eds-mini` wrapper for every Python command:
 
-**Last Updated**: 2026-04-21  
-**Total Tests**: 10 (9 automated + 1 manual GUI test)
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_fit_protocol_module.py
+```
 
----
+Last updated: 2026-04-23
 
-## Quick Start
+## Quick Regression Set
 
-Run all automated tests from the project root:
+Run these after broad fitting, session, background, or GUI-control changes:
 
-```bash
-# Core functionality tests
-powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_default_resolution.py
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_fit_protocol_module.py
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_refinement_stability.py
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_parallel_batch_fit.py
 powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_bg_handling.py
 powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_session_bg_handling.py
 powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_refit_on_element_change.py
-
-# Performance & behavior tests
-powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_fine_tune_timing.py
-powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_refinement_stability.py
-powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_calibrate_includes_fit.py
-powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_param_locking.py
 powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_hspy_roundtrip.py
-
-# Manual GUI test (requires interaction)
-powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_fine_tune_gui.py
 ```
 
----
+Run syntax checks after editing Python:
 
-#### `test_refinement_stability.py` â­
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python -m py_compile eds_fit_protocol.py eds_session.py eds_tool.py
+```
 
-**Purpose**: Verify that fine-tuning keeps a robust post-refinement model, respects the hard resolution bounds, and that fit-range settings/reset behavior are stable
+## Test Data
 
-**What it tests**:
-- The reported `acac/exp_7993.EDS` failure case no longer blows up after fine-tuning
-- A fresh `fit_model()` immediately after fine-tuning reproduces the same `Ï‡Â²áµ£`
-- The kept calibrated state rejects unstable transient resolution-calibration results when needed
-- `clear_fit()` resets offset, resolution, and stored reference-BG shift
-- Fit lower/upper limits and reference-BG ignore width propagate to newly loaded spectra in a session
+Common files used by tests:
 
-**Updated Notes (2026-04-20)**:
-- A fresh `fit_model()` immediately after fine-tuning now stays improved and does not blow up.
-- Resolution calibration is hard-bounded to `127-130 eV`, with warnings when the fit hits a bound.
-- `test_refinement_stability.py` now also checks the batch-average improvement from applying the active refined calibration to the fitted `acac` set.
-
-**Success Criteria**:
-- âœ… `exp_7993` improves after `fine_tune_model()`
-- âœ… Immediate refit after fine-tuning stays numerically stable
-- âœ… The final kept resolution stays sane (currently 128 eV for the reported `acac` case)
-- âœ… `clear_fit()` removes both the model and the hidden fine-tuned calibration state
-- âœ… New spectra inherit the current fit-range settings
-
-**When to Run**:
-- After changes to `fine_tune_model()`
-- After changes to `clear_fit()`
-- After changes to fit-range or reference-BG-shift handling
-- When validating multi-spectrum reference-BG workflows
-
-**Files Used**:
-- `acac/exp_7993.EDS`
+- `grain1_thin.eds`
+- `grain1_thick.eds`
+- `bg_near_grain1_thin.eds`
+- `bg_near_grain1_thick.eds`
+- `acac/*.EDS`
 - `acac/near_7994.EDS`
-- `grain1_thin.eds`
-- `grain1_thick.eds`
-- `bg_near_grain1_thin.eds`
 
----
+Do not modify these data files unless the tests are intentionally updated.
 
-#### `test_hspy_roundtrip.py` ⭐
+## Core Tests
 
-**Purpose**: Verify that `.hspy` exports preserve EDS Tool fit state, restore it on load, and remain stable under re-fitting
+### `test_fit_protocol_module.py`
 
-**What it tests**:
-- `.hspy` export writes the full EDS Tool record state into metadata
-- Loading a saved `.hspy` restores:
-  - fitted model
-  - reference background
-  - fit settings
-  - display / peak-sum source modes
-  - `χ²r`, offset, and resolution
-- A fresh `fit_model()` on the loaded `.hspy` reproduces the same fit result
-- When matching `.eds` and `.hspy` files exist, the loader prefers `.hspy`
+Purpose: direct regression test for `eds_fit_protocol.py`.
 
-**When to Run**:
-- After changing `.hspy` export or load behavior
-- After changing model-state persistence
-- After changing path discovery / file-preference logic
+Checks:
 
-**Files Used**:
-- `grain1_thin.eds`
-- `bg_near_grain1_thin.eds`
-- temporary files under `tests/_tmp_hspy_roundtrip`
+- `fit_spectrum()` and `refine_fit()` on validated multi-spectrum and
+  single-spectrum cases.
+- Masked reference-background `yscale` prefit is present in `bg_spec`.
+- Low-energy peak-sum screening keeps positive-evidence lines active and fixes
+  clearly absent low-energy lines at zero.
+- `exp_7987` with extra absent `F` stays in the short bounded-fit path.
+- `exp_7985` with real `F` keeps `F_Ka` active.
+- First refinement improves the initial fit.
+- Repeat refinement stays close to the first refined solution.
 
----
+Output includes:
 
-## Test Categories
+- Initial, refined, and repeat `chi2r`.
+- Runtime for each phase.
+- Per-step `nfev`.
+- Low-energy between-peak residual metrics.
 
-### ⚡ Performance Tests
+Run after:
 
-#### `test_fine_tune_timing.py` ⭐ **CRITICAL**
+- Any change to `eds_fit_protocol.py`.
+- Any change to model-building, parameter bounds, low-energy screening, or
+  refinement ordering.
 
-**Purpose**: Benchmark fine-tuning performance to detect regressions
+### `test_refinement_stability.py`
 
-**What it tests**:
-- Initial fit time
-- Fine-tuning time
-- Chi-square improvement
-- Detects if fine-tuning becomes unreasonably slow
+Purpose: integrated `EDSSpectrumRecord` refinement and fit-range regression.
 
-**Expected Output**:
-```
-=== Test: Fine-tune Timing ===
-Initial fit...
-  Initial fit took: ~3s
-  Initial χ²ᵣ: ~0.27
+Checks:
 
-Fine-tuning...
-=== Fine-tuning grain1_thin ===
-Initial χ²ᵣ: ~0.27
-Initial offset: -0.002152 keV
-Initial resolution: 128.00 eV
-Initial BG shift: 0.000000 keV
+- `acac/exp_7993.EDS` no longer blows up after refinement.
+- A fresh `fit_model()` after refinement reproduces the same good basin.
+- Repeat refinement stays stable on validated cases.
+- `clear_fit()` resets model and hidden calibration state.
+- Fit lower/upper limits and reference-background ignore width propagate to new
+  records in a session.
+- Applying active fine-tuning to a batch improves the fitted-batch mean
+  `chi2r`.
 
-After offset calibration:
-  Offset: 0.002169 keV (Δ = 4.32 eV)
-  χ²ᵣ: ~0.21 (Δ ≈ -21%)
+Run after:
 
-After background shift refinement:
-  BG shift: 0.002733 keV (Δ = 2.73 eV)
-  χ²ᵣ: ~0.21
+- Changes to `EDSSpectrumRecord.fit_model()`.
+- Changes to `EDSSpectrumRecord.fine_tune_model()`.
+- Changes to fit-range, calibration reset, or session propagation.
 
-After resolution calibration (with locked parameters):
-  Resolution: 127.21 eV (Δ = -0.79 eV)
-  χ²ᵣ: ~0.19 (Δ ≈ -9%)
+### `test_parallel_batch_fit.py`
 
-After final refinement fit:
-  χ²ᵣ: ~0.20
+Purpose: batch execution regression.
 
---- Summary ---
-Total offset change: +4.32 eV
-Total resolution change: -0.79 eV
-Total BG shift change: +2.73 eV
-χ²ᵣ: ~0.27 → ~0.20 (+26.3%)
+Checks:
 
-  Fine-tune took: ~3s
-  After fine-tuning χ²ᵣ: ~0.20
-  Improvement: chi-square should still improve substantially; absolute values changed after moving the fit/model path to CPS
+- `fit_all_models()` reproduces sequential per-spectrum fits.
+- `fine_tune_all_models()` keeps every fitted record valid.
+- `apply_active_fine_tuning_to_all_models()` completes and preserves model
+  results.
+- Prints wall-clock timings for sequential baseline and batch operations.
 
-✓ Fine-tuning time is reasonable (~1.0x initial fit time)
-```
+Run after:
 
-**Success Criteria**:
-- ✅ Fine-tuning time ≤ 3x initial fit time (ideally ~1.0x)
-- ✅ No maxfev warnings
-- ✅ Chi-square improves by ~20-30%
-- ✅ Absolute χ²ᵣ values may differ from older counts-based runs because the fit/model path is now CPS-normalized
-- ✅ Offset change typically 3-5 eV
-- ✅ Resolution change typically 1-5 eV
+- Changes to `EDSSession` batch methods.
+- Changes to thread-pool behavior.
+- Changes to numexpr thread handling.
 
-**Failure Indicators**:
-- ❌ Fine-tuning >10x initial fit time → Check parameter locking in fine_tune_model()
-- ❌ maxfev warnings → Parameters not properly locked during resolution calibration
-- ❌ Chi-square increases → Check calibration sequence
+### `test_bg_handling.py`
 
-**When to Run**:
-- After ANY changes to `fine_tune_model()` method
-- After updating exspy/hyperspy versions
-- Before releases
-- When investigating GUI freezing issues
+Purpose: background handling and explicit signal-source regression.
 
-**Files Used**:
-- `grain1_thin.eds` - Sample spectrum
-- `bg_near_grain1_thin.eds` - Background spectrum
+Checks:
 
----
+- Basic record loading and default signal modes.
+- `bg_elements` mode fits on CPS-normalized data.
+- `bg_spec` mode creates the reference-background fixed-pattern component.
+- Raw, measured-background-subtracted, and fitted-reference-subtracted signal
+  modes work when available.
+- Invalid fitted-reference subtraction raises clear errors.
+- `bg_fit_mode="none"` works.
 
-### 🔬 Core Functionality Tests
+Run after:
 
-#### `test_default_resolution.py` ⭐
+- Changes to background fitting modes.
+- Changes to display/peak-sum source selection.
+- Changes to fitted-reference subtraction.
 
-**Purpose**: Verify energy resolution defaults to correct value (128 eV, not HyperSpy's default 133 eV)
+### `test_session_bg_handling.py`
 
-**What it tests**:
-- Spectrum loads with 128 eV resolution
-- Background spectrum also gets 128 eV
+Purpose: session-level background and source-mode propagation.
 
-**Expected Output**:
-```
-=== Test: Default Energy Resolution ===
+Checks:
 
-Energy resolution after loading: 128 eV
-✓ Default resolution is correctly set to 128 eV
+- Multiple records receive common elements and background settings.
+- Explicit display and peak-sum source modes are preserved.
+- Invalid fitted-reference source modes are rejected when unavailable.
+- Peak-sum intensities use the selected source.
 
-=== Test: Background Energy Resolution ===
+Run after:
 
-Background energy resolution: 128 eV
-✓ Background resolution is correctly set to 128 eV
-```
+- Changes to `EDSSession` setting propagation.
+- Changes to display/peak-sum source defaults.
 
-**Success Criteria**:
-- ✅ Main spectrum: 128 eV (not 133)
-- ✅ Background spectrum: 128 eV
+### `test_refit_on_element_change.py`
 
-**When to Run**:
-- After changes to `EDSSpectrumRecord.__init__()`
-- After updating HyperSpy/exspy
-- Periodically as regression test
+Purpose: model update behavior when elements change.
 
-**Files Used**:
-- `grain1_thin.eds`
-- `bg_near_grain1_thin.eds`
+Checks:
 
----
+- Changing sample elements re-fits fitted spectra.
+- Changing background elements re-fits when `bg_elements` mode uses them.
+- No automatic fit is created when no model exists.
+- Session-level element changes update fitted records consistently.
 
-#### `test_bg_handling.py` ⭐
+Run after:
 
-**Purpose**: Test all background handling modes and fitting modes
+- Changes to `set_elements()`.
+- Changes to `set_bg_elements()`.
+- Changes to in-place model update logic.
 
-**What it tests**:
-1. Basic loading and element setting
-2. `bg_elements` mode on the CPS-normalized fit signal
-3. `bg_spec` mode (ScalableFixedPattern with CPS-normalized background spectrum)
-4. Explicit display / peak-sum source modes
-5. Rejection of invalid fitted-background subtraction
-6. Additional fit-background modes:
-   - `bg_fit_mode='none'`
-   - two-step reference-BG prefit with sample exclusion
-   - two-step BG-elements-only prefit
+### `test_hspy_roundtrip.py`
 
-**Expected Output**:
-```
-============================================================
-Testing EDSSpectrumRecord Background Handling
-============================================================
+Purpose: `.hspy` persistence regression.
 
-=== Test 1: Basic Loading ===
-Loaded: grain1_thin
-...
-✓ Basic loading test passed
+Checks:
 
-=== Test 2: BG Elements Mode ===
-...
-Model fitted successfully with 79 components
-✓ BG elements mode test passed
+- Exported `.hspy` files preserve EDS Tool state metadata.
+- Loading `.hspy` restores fit settings, reference background, source modes,
+  model state, `chi2r`, offset, and resolution.
+- Re-fitting a loaded `.hspy` remains stable.
+- Loader prefers `.hspy` over same-stem `.eds`.
 
-=== Test 3: BG Spec Mode (ScalableFixedPattern) ===
-...
-Model fitted successfully with 21 components
-Has 'instrument' component: True
-✓ BG spec mode test passed
+Run after:
 
-=== Test 4: BG Correction Modes ===
-...
-✓ All BG correction modes tested
+- Changes to serialization/deserialization.
+- Changes to export formats.
+- Changes to load-path preference.
 
-=== Test 5: Fallback Behavior ===
-...
-✓ Fallback to no correction works
+### `test_default_resolution.py`
 
-============================================================
-All tests completed!
-============================================================
-```
+Purpose: ensure spectra and background spectra default to 128 eV energy
+resolution.
 
-**Success Criteria**:
-- ✅ bg_elements mode: fit runs on a CPS signal and overlapping BG elements do not expose fitted subtraction
-- ✅ bg_spec mode: 21 components (sample + polynomial + instrument)
-- ✅ bg_spec mode keeps `instrument.xscale` and `instrument.shift` fixed in the initial fit
-- ✅ Explicit signal modes (`raw`, `measured_bg_subtracted`, `fitted_reference_bg_subtracted`) work when available
-- ✅ Invalid fitted subtraction raises instead of silently falling back
+Run after:
 
-**When to Run**:
-- After changes to background handling logic
-- After changes to `fit_model()`, explicit signal-mode handling, or legacy `set_bg_correction_mode()`
-- Before releases
+- Changes to record initialization.
+- Changes to background loading.
 
-**Files Used**:
-- `grain1_thin.eds`
-- `bg_near_grain1_thin.eds`
+### `test_fine_tune_timing.py`
 
----
+Purpose: timing smoke test for the fine-tuning path.
 
-#### `test_session_bg_handling.py` ⭐
+This is older and less complete than `test_fit_protocol_module.py`, but still
+useful as a simple performance check for a single spectrum.
 
-**Purpose**: Test that background settings propagate correctly across all spectra in a session
+Run after:
 
-**What it tests**:
-1. Session loading of multiple spectra
-2. Element propagation to all spectra
-3. BG elements propagation
-4. Background spectrum loading for all
-5. Active-record display-mode changes do not fail just because other loaded spectra are still unfitted
-5. BG fit mode propagation
-6. Stable background mode / unit propagation
-7. Fitted subtraction availability only when the reference background is identifiable
-8. Peak-sum intensity computation with different source modes
+- Changes expected to affect fitting/refinement runtime.
 
-**Expected Output**:
-```
-============================================================
-Testing EDSSession Background Handling
-============================================================
+### `test_calibrate_includes_fit.py`
 
-=== Test 1: Session Loading ===
-Loaded 2 spectra
-✓ Session loading test passed
+Purpose: diagnostic test documenting HyperSpy/exSpy calibration behavior.
 
-=== Test 2: Element Propagation ===
-...
-✓ Element propagation test passed
+Use when investigating whether calibration helpers internally run fitting.
 
-[... all tests ...]
+### `test_param_locking.py`
 
-============================================================
-All tests PASSED! ✓
-============================================================
+Purpose: diagnostic test for parameter free/fixed state during calibration.
+
+Use when investigating slow or unstable refinement. It is not a normal release
+gate.
+
+## Standalone Protocol Explorer
+
+`tests/explore_fitting_protocols.py` is an investigation tool rather than a
+normal regression test.
+
+It can:
+
+- Build one live exSpy model per case.
+- Snapshot and restore candidate states.
+- Compare refinement orderings.
+- Export per-step CSV traces, fit-call summaries, baseline curves, and anomaly
+  JSON files.
+
+Typical command:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 `
+  python tests\explore_fitting_protocols.py `
+  --protocols offset_bgshift_resolution_search `
+  --repeat-cycle `
+  --remove-readd
 ```
 
-**Success Criteria**:
-- ✅ All spectra get same elements
-- ✅ All spectra get same bg_elements
-- ✅ All spectra get same background spectrum
-- ✅ Stable signal modes and units propagate to all spectra
-- ✅ `subtract_fitted` is rejected for overlapping `bg_elements` fits
-- ✅ Peak-sum intensities respond to the selected derived source
+Read `FITTING_TESTS.md` before using or modifying this script.
 
-**When to Run**:
-- After changes to `EDSSession` methods
-- After changes to background handling
-- Before releases
+## Manual GUI Test
 
-**Files Used**:
-- `grain1_thin.eds`
-- `grain1_thick.eds`
-- `bg_near_grain1_thin.eds`
+### `test_fine_tune_gui.py`
 
----
+Purpose: interactive smoke test for GUI fitting and plotting.
 
-#### `test_refit_on_element_change.py` ⭐
+Use after GUI changes that affect:
 
-**Purpose**: Verify that changing elements automatically refits the model
+- Fit/refine buttons.
+- Plot updates.
+- Display source controls.
+- Fitted reference-background display.
+- Static progress dialog behavior.
 
-**What it tests**:
-1. Changing sample elements triggers refit
-2. Changing BG elements triggers refit (in bg_elements mode)
-3. Changing BG elements does NOT trigger refit (in bg_spec mode, as expected)
-4. No automatic fit when no model exists yet
+Expected behavior:
 
-**Expected Output**:
-```
-============================================================
-Testing Automatic Refit on Element Changes
-============================================================
+- Fit and refine controls enable/disable sensibly.
+- Long-running operations show the static progress dialog.
+- Plot does not get recreated unnecessarily.
+- `Fitted reference` view can show fit and residual.
+- `Subtract measured` view behaves as signal-only.
 
-=== Test 1: Refit on Sample Element Change ===
-...
-✓ Model refitted automatically with 21 components
-✓ New model object created (expected)
-✓ Test passed: Model refits on sample element change
+## When to Update This File
 
-=== Test 2: Refit on BG Element Change (bg_elements mode) ===
-...
-✓ Component count increased as expected (38 → 55)
-✓ Test passed: Model refits on BG element change in bg_elements mode
+Update this file when:
 
-=== Test 3: No Refit on BG Element Change (bg_spec mode) ===
-...
-✓ Model unchanged (expected - BG elements not used in bg_spec mode)
-✓ Test passed: No refit on BG element change in bg_spec mode
+- A test is added, removed, or renamed.
+- A test's purpose or data set changes.
+- A test becomes diagnostic-only or moves into the main regression set.
+- Required commands or environment assumptions change.
 
-=== Test 4: No Model, No Fit ===
-...
-✓ No model created (expected)
-✓ Test passed: No automatic fit when no model exists
-
-============================================================
-All tests PASSED! ✓
-============================================================
-```
-
-**Success Criteria**:
-- ✅ New model object created when elements change (different ID)
-- ✅ Component count changes appropriately
-- ✅ Fitted intensities updated
-- ✅ Correct behavior in both bg_fit_modes
-- ✅ No fit when no existing model
-
-**When to Run**:
-- After changes to `set_elements()` or `set_bg_elements()`
-- After changes to model creation logic
-- Before releases
-
-**Files Used**:
-- `grain1_thin.eds`
-- `bg_near_grain1_thin.eds`
-
----
-
-### 🔍 Debugging & Behavior Tests
-
-#### `test_calibrate_includes_fit.py`
-
-**Purpose**: Document that exspy's calibration methods include internal fitting
-
-**What it tests**:
-- Whether `calibrate_energy_axis()` changes chi-square (yes, it does)
-- Performance with/without explicit `fit()` after calibration
-- Timing comparison
-
-**Expected Output**:
-```
-Initial χ²ᵣ: 747.04
-
-Test 1: calibrate_energy_axis(calibrate='offset') WITHOUT explicit fit()
-  Time: 3.38s
-  χ²ᵣ: 615.61
-  Chi-square changed? True
-
-Test 2: calibrate_energy_axis(calibrate='offset') WITH explicit fit()
-  Time: 2.59s
-  χ²ᵣ: 613.67
-```
-
-**Key Findings**:
-- ✅ Calibration methods include fitting (chi-square changes)
-- ✅ Additional `fit()` after calibration refines results slightly
-- ✅ Additional `fit()` is fast (~0.7s)
-
-**Implications for Code**:
-- Explicit `fit()` calls after offset calibration are optional but improve results
-- Final refinement fit after resolution calibration is recommended
-
-**When to Run**:
-- After updating exspy/hyperspy
-- When investigating fine-tuning behavior
-- As documentation/reference
-
-**Files Used**:
-- `grain1_thin.eds`
-- `bg_near_grain1_thin.eds`
-
----
-
-#### `test_param_locking.py`
-
-**Purpose**: Debug which parameters are free during fine-tuning
-
-**What it tests**:
-- Parameter states before/after each calibration step
-- Whether exspy automatically locks/unlocks parameters
-- Where maxfev warnings occur
-
-**Expected Output** (partial - test is designed to show where it might hang):
-```
-Initial χ²ᵣ: 747.04
-
-After initial fit:
-  ScalableFixedPattern: coefficient
-  Polynomial: coefficients.a0, coefficients.a1, ... (7 params)
-  [Element lines]: coefficient (10 params)
-  Total free parameters: 20
-
-=== Step 1: calibrate_energy_axis(calibrate='offset') ===
-
-After offset calibration (before fit):
-  Total free parameters: 20
-
-After offset fit:
-  Total free parameters: 20
-
-=== Step 2: calibrate_energy_axis(calibrate='resolution') ===
-
-After resolution calibration (before fit):
-  Total free parameters: 20
-
->>> This is where it might hang or take very long...
-```
-
-**Key Findings**:
-- ✅ exspy calibration methods do NOT automatically lock parameters
-- ✅ All 20 parameters stay free throughout calibration
-- ✅ Resolution calibration with 20 free params hits maxfev warnings and takes ~77s
-- ✅ Manual parameter locking is required for performance
-
-**When to Run**:
-- When investigating fine-tuning performance issues
-- After updating exspy/hyperspy
-- When debugging parameter-related problems
-- As documentation/reference
-
-**Files Used**:
-- `grain1_thin.eds`
-- `bg_near_grain1_thin.eds`
-
-**Note**: This test may run very slowly or appear to hang during resolution calibration if run without the optimized `fine_tune_model()` implementation.
-
----
-
-### 🖥️ GUI Tests
-
-#### `test_fine_tune_gui.py` (Manual Test)
-
-**Purpose**: Interactive test for GUI fine-tuning workflow
-
-**Type**: Manual (requires user interaction)
-
-**Instructions**:
-1. Run the script: `powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_fine_tune_gui.py`
-2. GUI window opens with loaded spectrum
-3. Click "Fit (sel)" button to fit the model
-4. Observe initial chi-square value
-5. Click "Fine-tune (sel)" button
-6. Observe chi-square improvement and residuals
-
-**Expected Behavior**:
-- ✅ Fine-tune button is disabled until after fitting
-- ✅ Fine-tuning completes in ~6-10 seconds (doesn't freeze GUI)
-- ✅ Chi-square improves by ~20-30%
-- ✅ Residual plot shows reduced systematic offsets
-- ✅ GUI remains responsive throughout
-
-**Success Criteria**:
-- ✅ No GUI freezing
-- ✅ Progress visible (if progress indicators implemented)
-- ✅ Chi-square updates in UI
-- ✅ Plot refreshes after fine-tuning
-
-**Failure Indicators**:
-- ❌ GUI freezes for >10 seconds → Check fine_tune_model() performance
-- ❌ No chi-square improvement → Check calibration logic
-- ❌ Error messages → Check error handling
-
-**When to Run**:
-- After changes to fine-tuning implementation
-- After GUI changes
-- Before releases
-- When users report GUI freezing
-
-**Files Used**:
-- `grain1_thin.eds`
-- `bg_near_grain1_thin.eds`
-
----
-
-## Test Data Files
-
-All tests use the following data files (must be in project root):
-
-```
-grain1_thin.eds            - Sample EDS spectrum (thin section)
-grain1_thick.eds           - Sample EDS spectrum (thick section)
-bg_near_grain1_thin.eds    - Background spectrum for thin section
-bg_near_grain1_thick.eds   - Background spectrum for thick section
-```
-
-**Standard Test Elements**:
-- Sample elements: `['C', 'Cl', 'Cu', 'K', 'Na', 'O', 'S', 'Ca']` (or `['C', 'Cl', 'Cu', 'K', 'Na', 'O', 'S', 'Si']`)
-- Background elements: `['Cu', 'Au', 'Cr', 'Sn', 'Fe', 'Si', 'C', 'Nb', 'Mo']`
-
----
-
-## Test Results Summary (Last Run: 2026-04-15)
-
-| Test | Status | Time | Notes |
-|------|--------|------|-------|
-| test_default_resolution.py | ✅ PASS | <1s | 128 eV confirmed |
-| test_fine_tune_timing.py | ✅ PASS | ~6s | ~1.0x initial fit time |
-| test_bg_handling.py | ✅ PASS | ~25s | All modes work |
-| test_session_bg_handling.py | ✅ PASS | ~30s | Propagation correct |
-| test_refit_on_element_change.py | ✅ PASS | ~20s | Auto-refit works |
-| test_calibrate_includes_fit.py | ✅ PASS | ~15s | Behavior documented |
-| test_param_locking.py | ⚠️ DEBUG | Variable | Diagnostic tool |
-| test_fine_tune_gui.py | ⚠️ MANUAL | N/A | Requires interaction |
-
-**Overall**: ✅ All automated tests passing, no regressions detected
-
----
-
-## Regression Testing Checklist
-
-Run these tests after:
-
-### Critical Code Changes
-- ✅ **test_fine_tune_timing.py** after ANY changes to `fine_tune_model()`
-- ✅ **test_default_resolution.py** after changes to `EDSSpectrumRecord.__init__()`
-- ✅ **test_bg_handling.py** after changes to background handling logic
-- ✅ **test_refit_on_element_change.py** after changes to `set_elements()`
-
-### Library Updates
-- ✅ **test_fine_tune_timing.py** after updating exspy/hyperspy
-- ✅ **test_calibrate_includes_fit.py** after updating exspy/hyperspy
-- ✅ **test_default_resolution.py** after updating HyperSpy
-
-### Before Releases
-- ✅ ALL automated tests
-- ✅ **test_fine_tune_gui.py** (manual)
-
-### When Users Report Issues
-- GUI freezing → **test_fine_tune_timing.py**, **test_fine_tune_gui.py**
-- Wrong chi-square values → **test_bg_handling.py**, **test_fine_tune_timing.py**
-- Element changes not working → **test_refit_on_element_change.py**
-
----
-
-## Troubleshooting Test Failures
-
-### test_fine_tune_timing.py Fails
-
-**Symptom**: Fine-tuning takes >20 seconds
-
-**Likely Causes**:
-1. Parameters not locked during resolution calibration
-2. Old exspy version with performance bugs
-3. Test data files missing
-
-**Fix**:
-- Check `fine_tune_model()` implementation in `eds_session.py`, lines 236-320
-- Verify parameter locking code is present:
-  ```python
-  # Lock all parameters before resolution calibration
-  locked_params = []
-  for component in self.model:
-      for param in component.parameters:
-          if param.free:
-              param.free = False
-              locked_params.append(param)
-  ```
-
-### test_bg_handling.py Fails
-
-**Symptom**: Wrong number of components or missing 'instrument' component
-
-**Likely Causes**:
-1. Background spectrum not loaded correctly
-2. Model creation logic changed
-3. Element list wrong
-
-**Fix**:
-- Check `fit_model()` implementation
-- Verify ScalableFixedPattern creation:
-  ```python
-  comp_bg = hs.model.components1D.ScalableFixedPattern(self._background)
-  comp_bg.name = 'instrument'
-  self.model.append(comp_bg)
-  ```
-
-### test_refit_on_element_change.py Fails
-
-**Symptom**: Model not refitting when elements change
-
-**Likely Causes**:
-1. Auto-refit logic removed from `set_elements()`
-2. Model comparison not working
-
-**Fix**:
-- Check `set_elements()` and `set_bg_elements()` implementations
-- Verify refit logic is present
-
-### Import Errors
-
-**Symptom**: `ModuleNotFoundError: No module named 'eds_session'`
-
-**Fix**:
-- Tests must be run from project root
-- Verify sys.path adjustment at top of test files:
-  ```python
-  import sys
-  import os
-  sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-  ```
-
----
-
-## Adding New Tests
-
-When adding new tests to this suite:
-
-1. **Name the test file** `test_<feature>.py`
-2. **Add sys.path adjustment** at the top:
-   ```python
-   import sys
-   import os
-   sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-   ```
-3. **Print clear output** with ✓/✗ indicators
-4. **Use standard test data files** (grain1_thin.eds, etc.)
-5. **Document expected output** in this file
-6. **Add to regression checklist** if relevant
-7. **Test the test** - run it to verify it works
-8. **Update this README** with test description and expected output
-
----
-
-## Python Test Framework Considerations
-
-**Note**: These tests are currently standalone Python scripts, not using pytest or unittest frameworks.
-
-**Advantages**:
-- Simple to run
-- Clear output format
-- Easy to debug
-- No framework dependencies
-
-**Disadvantages**:
-- No test discovery
-- Manual execution required
-- No test reporting tools
-
-**Future Consideration**: If the test suite grows significantly, consider migrating to pytest for better organization and reporting.
-
----
-
-## Maintenance
-
-**Test Data**: Keep test data files (`grain1_*.eds`, `bg_near_*.eds`) in project root. Do not modify these files as tests depend on their specific content.
-
-**Performance Baselines**: Update expected timing values in this document if hardware changes or optimizations are made.
-
-**Test Review**: Review this test suite quarterly or after major changes to ensure tests remain relevant and comprehensive.
-
----
-
-## Contact
-
-For questions about tests or to report test failures, see project documentation.
-
-**Last Test Run**: 2026-04-15  
-**Test Runner**: Automated via conda environment `eds-mini`  
-**All Tests**: ✅ PASSING
+Keep this file ASCII-only. Avoid checkmarks and other symbols because the
+Windows console used for these tests may not encode them reliably.
