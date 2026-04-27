@@ -322,6 +322,52 @@ Supported exports include:
 When both `.eds` and `.hspy` with the same stem are present, loading prefers
 `.hspy`.
 
+## Distribution
+
+The legacy PyInstaller build is kept in place. Relevant files:
+
+- `rebuild.bat`
+- `eds_tool_folder.spec`
+- `eds_tool.spec`
+- `OPTIMIZATION_SUMMARY.md`
+
+The current cx_Freeze build uses `setup_cx.py` and writes to `dist-cx` so it
+does not overwrite the PyInstaller `dist` tree. The frozen executable is
+`dist-cx\eds_tool.exe`. `eds_tool_cx_entry.py` is the frozen entry point and
+prepares local Numba and Matplotlib cache/config directories before importing
+the GUI.
+
+Do not add the whole `PyQt6` package to the cx_Freeze `packages` list. That
+causes cx_Freeze to include every PyQt6 extension module and the corresponding
+Qt DLL/QML/plugin families. Include only the required Qt modules explicitly in
+`setup_cx.py`.
+
+The cx_Freeze build script now deletes any previous `dist-cx` tree before
+building so stale binaries do not survive package-exclusion changes.
+
+Size trimming currently happens in two ways:
+
+- import-time excludes for unused Qt, Tk, SciPy, and scikit-image modules
+- post-build pruning of test/example trees and clearly unused payload such as
+  `skimage\data`
+
+Keep `skimage._vendored` and `exspy.data`. HyperSpy/exSpy import them during
+startup even though this application does not use the corresponding sample data
+or 2D workflows directly.
+
+Qt window icons in frozen builds are resolved from either the module directory
+or the executable directory, and the application icon is also set on the
+`QApplication` so Matplotlib/Qt child windows inherit it more reliably on
+Windows.
+
+Use:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python setup_cx.py build_exe
+```
+
+or run `rebuild_cx.bat`.
+
 ## Performance Notes
 
 - Use `scripts/with-eds-mini.ps1` for all Python commands.

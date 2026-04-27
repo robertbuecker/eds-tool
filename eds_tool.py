@@ -33,8 +33,36 @@ except ImportError:
 # Restore stderr after imports
 sys.stderr = _stderr_backup
 
-ICON_PATH = os.path.join(os.path.dirname(__file__), "eds_icon.png")
-# print(f"Icon path: {ICON_PATH}")
+def _resolve_icon_path() -> Optional[str]:
+    candidates = []
+    module_dir = Path(__file__).resolve().parent
+    candidates.extend([
+        module_dir / "eds_icon.ico",
+        module_dir / "eds_icon.png",
+    ])
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.extend([
+            exe_dir / "eds_icon.ico",
+            exe_dir / "eds_icon.png",
+            exe_dir / "lib" / "eds_icon.ico",
+            exe_dir / "lib" / "eds_icon.png",
+        ])
+    for path in candidates:
+        if path.exists():
+            return str(path)
+    return None
+
+
+ICON_PATH = _resolve_icon_path()
+
+
+def _set_window_icon(window) -> None:
+    if not GUI_AVAILABLE or not ICON_PATH:
+        return
+    icon = QIcon(ICON_PATH)
+    if not icon.isNull():
+        window.setWindowIcon(icon)
 
 # Configuration for auto workflow exports
 AUTO_SPECTRUM_FORMATS = ['emsa', 'csv', 'hspy']  # Formats for spectrum export
@@ -175,7 +203,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self._element_preview_active = False
         self._plot_click_cid = None
         self.setWindowTitle("EDS signals")
-        self.setWindowIcon(QIcon(ICON_PATH))  # Set icon for navigator
+        _set_window_icon(self)
         self.table_views: dict[str, QtWidgets.QDialog] = {}
         self._pending_first_show_layout_fix = True
         self._plot_initialized = False
@@ -185,7 +213,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         
         self.popup = QtWidgets.QDialog(self)
         self.popup.setWindowTitle("X-ray lines")
-        self.popup.setWindowIcon(QIcon(ICON_PATH))  # Set icon for popup
+        _set_window_icon(self.popup)
         self.popup.setModal(False)
         popup_layout = QtWidgets.QVBoxLayout(self.popup)
         self.popup_browser = QtWidgets.QTextBrowser()
@@ -861,7 +889,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         if previous_effective_unit is not None and previous_effective_unit != current_effective_unit:
             self.reset_y()
 
-        self.fig.canvas.manager.window.setWindowIcon(QIcon(ICON_PATH))
+            _set_window_icon(self.fig.canvas.manager.window)
         plt.show(block=False)
         
         # Connect right-click handler
@@ -906,7 +934,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
     def _create_progress_dialog(self, title: str):
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle(title)
-        dialog.setWindowIcon(QIcon(ICON_PATH))
+        _set_window_icon(dialog)
         dialog.setModal(False)
         dialog.setWindowFlag(QtCore.Qt.WindowContextHelpButtonHint, False)
         layout = QtWidgets.QVBoxLayout(dialog)
@@ -1256,7 +1284,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         )
         fig_manager = self.fig.canvas.manager
         fig_win = fig_manager.window
-        fig_win.setWindowIcon(QIcon(ICON_PATH))
+        _set_window_icon(fig_win)
         fig_win.show()
         fig_win.setGeometry(plot_geom)
 
@@ -1606,6 +1634,7 @@ def main():
             sys.exit(1)
         matplotlib.use('QtAgg')
         app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+        _set_window_icon(app)
         nav = NavigatorWidget(session)
         nav.show()
         app.exec_()
