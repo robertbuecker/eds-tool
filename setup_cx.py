@@ -12,6 +12,8 @@ import importlib.util
 import shutil
 import sys
 import zipfile
+import os
+from eds_version import __version__, VERSION_TAG
 from pathlib import Path
 
 from cx_Freeze import Executable, setup
@@ -22,7 +24,12 @@ sys.setrecursionlimit(10000)
 
 ROOT = Path(__file__).resolve().parent
 ENV_PREFIX = Path(sys.prefix).resolve()
-BUILD_DIR = ROOT / "dist-cx"
+BUILD_DIR = ROOT / "dist-cx" / f"eds-tool-{__version__}"
+if '--print-version-tag' in sys.argv:
+    print(VERSION_TAG)
+    raise SystemExit
+if Path(sys.prefix).name.lower() != 'eds-mini':
+    raise SystemExit('Build using scripts/with-eds-mini.ps1 in eds-mini')
 
 DATA_SUFFIXES = {
     ".cfg",
@@ -55,7 +62,6 @@ PRUNE_DIR_NAMES = {
     "example",
     "examples",
     "test",
-    "testing",
     "tests",
     "testsuite",
 }
@@ -167,9 +173,11 @@ def _prune_build_tree(build_dir: Path) -> None:
     if not lib_dir.exists():
         return
 
-    for path in sorted(lib_dir.rglob("*"), key=lambda item: len(item.parts), reverse=True):
-        if path.is_dir() and path.name in PRUNE_DIR_NAMES:
-            shutil.rmtree(path, ignore_errors=True)
+    for directory, names, _files in os.walk(lib_dir):
+        for name in list(names):
+            if name in PRUNE_DIR_NAMES:
+                shutil.rmtree(Path(directory) / name, ignore_errors=True)
+                names.remove(name)
 
     for relative_path in PRUNE_PATHS:
         path = build_dir / relative_path
@@ -179,6 +187,11 @@ def _prune_build_tree(build_dir: Path) -> None:
             shutil.rmtree(path, ignore_errors=True)
         else:
             path.unlink()
+    # scikit-learn imports this vendored runtime package during normal startup.
+    source = _package_dir('sklearn') / 'externals' / 'array_api_extra' / 'testing'
+    if source.is_dir():
+        shutil.copytree(source, lib_dir / 'sklearn' / 'externals' / 'array_api_extra' / 'testing',
+                        dirs_exist_ok=True, ignore=shutil.ignore_patterns('__pycache__'))
 
 
 class build_exe(cx_build_exe):
@@ -189,6 +202,9 @@ class build_exe(cx_build_exe):
         super().run()
         _prune_build_tree(build_dir)
         _remove_zip_dist_info(build_dir / "lib" / "library.zip", "exspy")
+        shutil.copy2(ROOT / 'CHANGELOG.md', build_dir / 'CHANGELOG.md')
+        archive = shutil.make_archive(str(build_dir), 'zip', root_dir=build_dir.parent, base_dir=build_dir.name)
+        print(f'Distribution ZIP: {archive}')
 
 
 build_exe_options = {
@@ -289,9 +305,20 @@ build_exe_options = {
 }
 
 
+if '--package-existing' in sys.argv:
+    if not (BUILD_DIR / 'eds_tool.exe').is_file():
+        raise SystemExit('No existing distribution to package')
+    print('Pruning existing distribution...', flush=True)
+    _prune_build_tree(BUILD_DIR)
+    _remove_zip_dist_info(BUILD_DIR / 'lib' / 'library.zip', 'exspy')
+    shutil.copy2(ROOT / 'CHANGELOG.md', BUILD_DIR / 'CHANGELOG.md')
+    print('Creating ZIP...', flush=True)
+    print(shutil.make_archive(str(BUILD_DIR), 'zip', root_dir=BUILD_DIR.parent, base_dir=BUILD_DIR.name), flush=True)
+    raise SystemExit
+
 setup(
     name="EDS Tool",
-    version="0.1.0",
+    version=__version__,
     description="EDS spectrum analysis tool",
     cmdclass={"build_exe": build_exe},
     options={"build_exe": build_exe_options},

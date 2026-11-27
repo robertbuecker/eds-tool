@@ -465,25 +465,19 @@ is explicitly supplied. Raw files retain the 128 eV default.
 
 ## Distribution
 
-The legacy PyInstaller build is kept in place. Relevant files:
-
-- `rebuild.bat`
-- `eds_tool_folder.spec`
-- `eds_tool.spec`
-- `OPTIMIZATION_SUMMARY.md`
-
-The current cx_Freeze build uses `setup_cx.py` and writes to `dist-cx` so it
-does not overwrite the PyInstaller `dist` tree. The frozen executable is
-`dist-cx\eds_tool.exe`. `eds_tool_cx_entry.py` is the frozen entry point and
-prepares local Numba and Matplotlib cache/config directories before importing
-the GUI.
+The cx_Freeze build reads eds_version.py, shared with the window title. Version 0.6 adds fitting session recovery, Data Explorer CSV loading, and auto fitting. distribute_cx.bat uses eds-mini and writes dist-cx/eds-tool-0.6 plus its ZIP. Builds never increment versions implicitly; scripts/bump_version.py changes the authoritative version explicitly.
 
 Do not add the whole `PyQt6` package to the cx_Freeze `packages` list. That
 causes cx_Freeze to include every PyQt6 extension module and the corresponding
 Qt DLL/QML/plugin families. Include only the required Qt modules explicitly in
 `setup_cx.py`.
 
-The cx_Freeze build script now deletes any previous `dist-cx` tree before
+Pruning walks directories top-down and skips removed trees. Preserve runtime
+packages named `testing`, especially scikit-learn's vendored array_api_extra
+testing package, which is imported in normal startup. `--package-existing`
+reapplies pruning/metadata repair and recreates the ZIP without re-freezing.
+
+The cx_Freeze build script now cleans the current version output directory before
 building so stale binaries do not survive package-exclusion changes.
 
 Size trimming currently happens in two ways:

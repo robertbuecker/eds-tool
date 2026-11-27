@@ -81,8 +81,4 @@ workflow behavior.
 
 ## Distribution
 
-The application is packaged with PyInstaller. Relevant files:
-
-- `rebuild.bat`
-- `eds_tool_folder.spec`
-- `OPTIMIZATION_SUMMARY.md`
+The application uses cx_Freeze. Run distribute_cx.bat through eds-mini. eds_version.py is the sole version source for the GUI, build metadata, versioned folder and ZIP.

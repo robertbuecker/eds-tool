@@ -1,4 +1,5 @@
 import sys
+from eds_version import VERSION_TAG
 import warnings
 import logging
 import os
@@ -216,7 +217,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self._pending_element_hint_text = "Click 'Apply' to re-fit with new elements."
         self._element_preview_active = False
         self._plot_click_cid = None
-        self.setWindowTitle("EDS signals")
+        self.setWindowTitle(f"EDS Tool {VERSION_TAG} - EDS signals")
         _set_window_icon(self)
         self.table_views: dict[str, QtWidgets.QDialog] = {}
         self._pending_first_show_layout_fix = True

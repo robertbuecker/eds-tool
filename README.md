@@ -1,5 +1,16 @@
 # EDS Tool
 
+Current release: **0.6**. See [version news](CHANGELOG.md).
+
+Build a portable distribution with `distribute_cx.bat` (or the compatible
+`rebuild_cx.bat` alias). It uses the `eds-mini` wrapper and creates
+`dist-cx/eds-tool-0.6/eds_tool.exe` and `dist-cx/eds-tool-0.6.zip`.
+The ZIP contains the entire versioned folder; extract it before running.
+`eds_version.py` supplies the GUI title, executable metadata and archive name.
+For subsequent releases run the wrapper with
+`python scripts/bump_version.py minor` (or `major`/`patch`), update CHANGELOG.md,
+then build. Rebuilding does not increment the version.
+
 EDS Tool is an interactive HyperSpy/exSpy based program for TEM EDS spectrum
 analysis. It is designed for sessions with one or many spectra, a measured
 reference/background spectrum, model fitting, refinement, intensity tables, and
