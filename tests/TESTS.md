@@ -7,7 +7,7 @@ This file documents the current automated and manual tests. Use the
 powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_fit_protocol_module.py
 ```
 
-Last updated: 2026-04-23
+Last updated: 2026-11-27
 
 ## Quick Regression Set
 
@@ -21,6 +21,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python test
 powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_session_bg_handling.py
 powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_refit_on_element_change.py
 powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_hspy_roundtrip.py
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_hspy_session_loading.py
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_hspy_gui_loading.py
 ```
 
 Run syntax checks after editing Python:
@@ -43,6 +45,141 @@ Common files used by tests:
 Do not modify these data files unless the tests are intentionally updated.
 
 ## Core Tests
+
+### `test_auto_fit.py` / `test_auto_cli_progress.py`
+
+Run via the eds-mini wrapper after automatic workflow or GUI progress changes.
+The former fits small copied grain/acac cases with complete/omitted elements
+and with/without reference backgrounds, checks an inflated background, and
+tests a valid generated raw spectrum. Writes diagnostics and image QA under
+`.tmp/auto_fit_tests`. It checks fit rejection rather than masking.
+The latter runs real CLI subprocesses to verify default HSPY output, fitted
+plots/tables/snapshots, rejection exit status, and Qt progress/cursor cleanup
+on successful and failed saves. It uses temporary copies, not external data.
+
+### `test_intensity_uncertainty.py`
+
+Checks one-standard-error reporting, fixed/twinned/stale/missing error handling,
+legacy saved parameters without std, two-significant-digit truncation,
+scientific notation, ratio propagation, and full-precision CSV columns with
+explicit NaN values. The full command also checks offscreen fitted-table
+rendering, tooltips, normalization, selected columns, selection preservation,
+and unchanged summed-table export. Saves `.tmp/intensity_uncertainty_table.png`.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_intensity_uncertainty.py
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_intensity_uncertainty.py --format-only
+```
+
+The `--format-only` command runs numerical, notation, saved-parameter and CSV
+checks without importing Qt or the scientific fitting stack.
+
+On 2026-11-27, the full GUI/numerical/export checks, session integration,
+existing intensity-navigation and HSPY session-loading tests passed after
+repairing the mixed Conda/pip environment. A separate read-only check of all
+93 saved Clinker spectra verified 843 finite free-amplitude errors and 273
+fixed-amplitude NaNs, with full-precision CSV round-trip parity. Original
+spectra and saved models were not modified by that check.
+The standalone fitting-protocol regression and GUI loading of a copied Clinker
+snapshot also passed after the repair. The broader refinement-stability,
+parallel-batch and background suites were not rerun for this reporting change.
+The CAP CSV was refreshed externally to 90 experiments during validation. A
+subsequent real-data GUI smoke check loaded all 90 without refitting, restored
+only the active model, and verified numerical GUI CSV parity for 815 finite
+standard errors and 265 NaNs.
+
+### `test_intensity_uncertainty_session.py`
+
+Uses a real fit on a temporary spectrum copy. Checks fitted amplitude errors,
+fixed parameters with stale errors, session CSV output, lazy HSPY uncertainty
+reload/export without constructing models, legacy missing errors, and immutable
+source counts. Run after uncertainty/session export or saved-state changes.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_intensity_uncertainty_session.py
+```
+
+### `test_startup_diagnostics.py`
+
+Checks stderr restoration after successful and failed imports, propagation of
+the original dependency exception, traceback logging, and operation without a
+console stream. Does not import Qt or the scientific stack.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_startup_diagnostics.py
+```
+
+### `test_cap_import.py`
+
+Uses copied repository spectra in a temporary CAP-style folder tree. Checks
+preamble/header parsing, quoted CSV fields, short rows, literal values and
+missing columns, experiment paths, HSPY preference, missing-spectrum reporting,
+enrichment of existing records, and source/fit/display metadata persistence
+through HSPY save/reload. Rejects ordinary spectrum CSVs as CAP input.
+
+### `test_intensity_navigation.py`
+
+Offscreen Qt check for compact Selected/All Save control geometry at startup.
+Checks bidirectional summed/fitted/control-window row selection, one plot update
+per spectrum change, real displayed-spectrum identity, selection stability
+during normalization/column filtering, and clearing selection for missing
+results. Writes `.tmp/compact_save_controls.png` for visual layout inspection.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_cap_import.py
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_intensity_navigation.py
+```
+
+### `test_hspy_session_loading.py`
+
+Creates two different fitted snapshots using temporary copies of repository
+spectra. Verifies deferred import and immediate fit results; independent saved
+settings in empty/existing sessions; component activation, parameter values,
+errors, bounds and twin expressions; channel masks and native diagnostics;
+summed intensities; calibrated resolution; embedded-reference restoration after
+the copied reference file is removed; snapshot re-export without model building;
+duplicate avoidance; unchanged-element no-op; and incremental cancellation.
+Run after snapshot, session-load, or model-restoration changes.
+
+### `test_hspy_gui_loading.py`
+
+Offscreen Qt regression with temporary local fixtures. Verifies GUI import never
+refits, restores only the active model, populates element/background/fit/source
+controls and fitted tables, and saves/reopens plot limits, scale, overlays, and
+normalization. An optional `--copied-directory` accepts at most five snapshots
+already copied into repository `.tmp`; it refuses original data directories.
+It saves changed snapshots only into its own temporary workspace.
+
+Example for a small copied external subset:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_hspy_gui_loading.py --copied-directory .tmp\hspy_reload_gui_subset
+```
+
+Known existing regression: on 2026-11-20, `test_refinement_stability.py` failed
+its positive-background-shift assertion identically with the original session
+module and the snapshot changes. See `FITTING_TESTS.md` for the evidence.
+
+### `test_plot_export.py`
+
+Run after interactive plot-export or display integration changes:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python tests\test_plot_export.py
+```
+
+Uses real HyperSpy/exSpy spectra, fitted background-element and numerical
+reference-background models. Checks
+PNG/SVG saves for raw, fitted-reference-subtracted, and measured-subtracted
+views with linear/log Y axes, physical axes-size preservation, footer bounds,
+normalization and reference provenance, failure restoration, and batch export
+with/without Y rescaling. Verifies immutable source/fit data and that the active
+plot is not recreated. Visual QA images are under `.tmp/plot_export_qa`.
+
+Manual GUI check: click Save plot in Selected after zooming/changing overlays;
+check PNG/SVG beside the EDS file. Select normalization in Fitted Line
+Intensities and check both raw integrals and ratios. Save plots in All: try
+Yes, No, and Cancel and verify the original displayed plot remains unchanged.
 
 ### `test_fit_protocol_module.py`
 

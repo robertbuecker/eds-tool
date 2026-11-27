@@ -8,6 +8,24 @@ The implementation described here lives primarily in `eds_fit_protocol.py` and
 is called by `EDSSpectrumRecord.fit_model()` and
 `EDSSpectrumRecord.fine_tune_model()`.
 
+## Guarded automatic fitting (2026-11-27)
+
+`eds_auto.py` reuses the existing fit/refine protocol. Only the first spectrum
+is refined; its offset, resolution and reference shift are transferred to later
+fits. Quality checks use CPS model predictions and data in the configured fit
+range. Rejection is conservative warning/cancellation; no automatic unknown-peak
+masking is performed. See `AUTO_WORKFLOW_README.md` for all numerical thresholds.
+The optional protocol `max_nfev` budget is set only for auto mode (200); LM uses
+SciPy's `maxfev` spelling, TRF uses `max_nfev`. Default protocol fits are unchanged.
+
+`tests/test_auto_fit.py` exercises complete-element reference fits, omitted Cu
+and Fe, missing reference backgrounds on real grain/acac data, and an explicitly
+inflated reference background. It also checks a generated Poisson carbon
+spectrum as a valid no-reference case. All input copies/derivatives live under
+`.tmp/auto_fit_tests`. Per-case runtime, per-step nfev, chi2r and low-energy
+between-peak mean/absolute residuals are saved in its summary JSON. These are
+heuristic failure checks, not a general element-identification algorithm.
+
 ## Goals
 
 The fitting protocol must:
@@ -270,6 +288,17 @@ clearly absent low-energy lines is safer.
 
 ## Performance Diagnostics
 
+Fitted-intensity uncertainty reporting uses the existing amplitude `A.std`:
+one standard error, approximately 68% under a symmetric normal approximation.
+It does not alter screening, optimization, weighting, fitting input or parameter
+bounds. Fixed/twinned/inactive parameters must report an unavailable error even if
+HyperSpy retains a stale nonzero `std`. Missing/non-finite/non-positive errors
+are also unavailable. These local errors are conditional on the fitted model;
+they do not measure uncertainty in automatic family selection or provide a
+detection limit for a family fixed at zero. Normalized ratios use first-order
+propagation without parameter cross-covariances, which snapshots do not retain.
+Tests for uncertainty presentation/export are listed in `tests/TESTS.md`.
+
 Every fitting protocol change should report:
 
 - Wall-clock time per step.
@@ -304,6 +333,19 @@ The script writes CSV/JSON traces suitable for comparing protocols without
 re-running every experiment manually.
 
 ## Regression Tests
+
+Snapshot continuation checks are in `tests/test_hspy_session_loading.py` and
+`tests/test_hspy_gui_loading.py`. Import must not refit, overwrite per-record
+settings, or force model construction for unused records. Native model masks,
+statistics, free/fixed state and parameter twins must survive new snapshots;
+version 1 statistics are reconstructed on CPS `_fit_signal` for continuation.
+This does not change the fitting/refinement strategy described above.
+
+On 2026-11-20, `test_refinement_stability.py` stopped at its existing
+`tuned_shift > 0` assertion for `exp_7993`: both the pre-change session module
+and the snapshot-loading changes produced a shift of -0.011276 keV, with the
+same fit/refine/refit chi2r sequence (17.65, 2.17, 2.17). Keep this distinct from
+snapshot regressions; no fitting strategy or assertion was changed to hide it.
 
 Primary tests for fitting changes:
 

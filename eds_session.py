@@ -15,6 +15,10 @@ import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from eds_fit_protocol import FittingProtocolConfig, fit_spectrum, refine_fit
+from eds_cap_import import CAP_METADATA_KEY, read_cap_export
+from eds_intensity_uncertainty import (
+    amplitude_standard_error, saved_amplitude_standard_errors, write_fitted_intensity_csv,
+)
 
 try:
     import numexpr
@@ -60,7 +64,7 @@ DEFAULT_BACKGROUND_POLYNOMIAL_ORDER = 6
 DEFAULT_REFINE_ALL_MAX_WORKERS = 8
 DEFAULT_EXISTING_MODEL_REFIT_MAX_WORKERS = 4
 EDS_TOOL_STATE_KEY = 'EDS_Tool.state'
-EDS_TOOL_STATE_VERSION = 1
+EDS_TOOL_STATE_VERSION = 2
 
 
 def _prefer_hspy_path(path: str) -> str:
@@ -87,10 +91,21 @@ def _dedupe_preferred_spectrum_paths(paths: List[str]) -> List[str]:
 
 
 class EDSSpectrumRecord:
-    def __init__(self, path: str):
+    def __init__(self, path: str, *, defer_model: bool = False):
+        self.progress_callback = None
         self.path = _prefer_hspy_path(path)
         self.bg_file: Optional[str] = None
         self._signal = hs.load(self.path)
+        saved_state = self._signal.metadata.get_item(EDS_TOOL_STATE_KEY, default=None)
+        if hasattr(saved_state, 'as_dictionary'):
+            saved_state = saved_state.as_dictionary()
+        self.has_saved_state = isinstance(saved_state, dict)
+        # Transport metadata contains an entire reference spectrum. Keeping it
+        # on working signals makes every HyperSpy slice/intensity copy it again.
+        if self.has_saved_state:
+            del self._signal.metadata.EDS_Tool.state
+        self._pending_fit_state = None
+        self.plot_state = {}
         self._signal.metadata.set_item('General.title', os.path.splitext(os.path.basename(path))[0])
         self._signal.metadata.set_item('General.original_filename', self.path)
         self._signal.metadata.set_item('Signal.quantity', 'X-rays (Counts)')
@@ -135,7 +150,31 @@ class EDSSpectrumRecord:
         self.reference_bg_ignore_sample_half_width_keV = DEFAULT_IGNORE_SAMPLE_HALF_WIDTH_KEV
         self._sync_fit_signal_from_raw()
         self._refresh_display_signal_cache()
-        self._restore_from_saved_state_if_present()
+        if self.has_saved_state:
+            self._apply_serialized_state(saved_state, defer_model=defer_model)
+
+    @property
+    def has_fit(self) -> bool:
+        """Check availability without constructing a saved model."""
+        return self._model is not None or self._pending_fit_state is not None
+
+    @property
+    def model(self):
+        if self._pending_fit_state is not None:
+            state = self._pending_fit_state
+            self._pending_fit_state = None
+            try:
+                self._restore_saved_model(state)
+            except Exception as exc:
+                self._model = None
+                self._pending_fit_state = state
+                raise RuntimeError(f"Could not restore saved model for {self.path}: {exc}") from exc
+        return self._model
+
+    @model.setter
+    def model(self, value):
+        self._model = value
+        self._pending_fit_state = None
 
     @property
     def name(self) -> str:
@@ -273,7 +312,9 @@ class EDSSpectrumRecord:
         return signal
 
     def _serialize_model_state(self):
-        if self.model is None:
+        if self._pending_fit_state is not None:
+            return self._pending_fit_state
+        if self._model is None:
             return None
         components = []
         for component in self.model:
@@ -283,37 +324,73 @@ class EDSSpectrumRecord:
                 params.append({
                     'name': param.name,
                     'value': float(param.value),
+                    'std': None if param.std is None else float(param.std),
                     'free': bool(param.free),
                     'bmin': None if param.bmin is None else float(param.bmin),
                     'bmax': None if param.bmax is None else float(param.bmax),
                     'twin_component': getattr(getattr(twin, 'component', None), 'name', None),
                     'twin_parameter': getattr(twin, 'name', None),
+                    'twin_function_expr': param.twin_function_expr,
+                    'twin_inverse_function_expr': param.twin_inverse_function_expr,
                 })
-            components.append({'name': component.name, 'parameters': params})
+            components.append({'name': component.name, 'active': bool(component.active), 'parameters': params})
         return {
             'reduced_chisq': self.reduced_chisq,
             'components': components,
+            'channel_switches': self.model._channel_switches.tolist(),
+            'chisq': np.asarray(self.model.chisq.data).tolist(),
+            'dof': np.asarray(self.model.dof.data).tolist(),
+            'intensity_lines': [component.name for component in self.model.xray_lines],
         }
 
     def _apply_serialized_model_state(self, state):
         if self.model is None or not state:
             return
         component_map = self._component_map(self.model)
+        twins = []
         for component_state in state.get('components', []):
             component = component_map.get(component_state.get('name'))
             if component is None:
-                continue
+                raise ValueError(f"Saved component not reconstructed: {component_state.get('name')}")
+            component.active = bool(component_state.get('active', True))
             param_map = {param.name: param for param in component.parameters}
             for param_state in component_state.get('parameters', []):
                 param = param_map.get(param_state.get('name'))
                 if param is None:
-                    continue
-                if param.twin is None:
-                    param.value = float(param_state.get('value', param.value))
+                    raise ValueError(f"Saved parameter not reconstructed: {component.name}.{param_state.get('name')}")
+                # Values/bounds first, relationships second. Version 1 omitted
+                # twin expressions, so retain exSpy's generated family ratios.
+                expression = param_state.get('twin_function_expr', param.twin_function_expr)
+                inverse = param_state.get('twin_inverse_function_expr', param.twin_inverse_function_expr)
+                param.twin = None
+                param.value = float(param_state.get('value', param.value))
+                param.std = param_state.get('std')
                 param.free = bool(param_state.get('free', param.free))
                 param.bmin = param_state.get('bmin')
                 param.bmax = param_state.get('bmax')
                 param.assign_current_value_to_all()
+                twins.append((param, param_state, expression, inverse))
+        for param, saved, expression, inverse in twins:
+            twin_name = saved.get('twin_component')
+            if twin_name:
+                twin_component = component_map[twin_name]
+                target = next(p for p in twin_component.parameters if p.name == saved['twin_parameter'])
+                param.twin_function_expr = expression
+                param.twin_inverse_function_expr = inverse
+                param.twin = target
+            param.assign_current_value_to_all()
+        if 'channel_switches' in state:
+            self.model.set_signal_range_from_mask(np.asarray(state['channel_switches'], dtype=bool))
+        self.model._set_p0()
+        if 'chisq' in state and 'dof' in state:
+            self.model.chisq.data[...] = state['chisq']
+            self.model.dof.data[...] = state['dof']
+        else:
+            # Old snapshots only stored the displayed chi2r. Reconstruct native
+            # diagnostics so refinement can continue without an initial fit.
+            self.model._set_current_degrees_of_freedom()
+            with self._temporary_model_signal_range(self.model):
+                self.model._calculate_chisq()
         self._restore_model_state_hygiene()
         self.reduced_chisq = state.get('reduced_chisq')
 
@@ -347,6 +424,51 @@ class EDSSpectrumRecord:
             },
             'background_signal': self._serialize_signal_payload(self._background) if self._background is not None else None,
             'fit_state': self._serialize_model_state(),
+            'summed_intensities': self._serialize_intensities(self.intensities),
+            'plot_state': dict(self.plot_state),
+        }
+
+    @staticmethod
+    def _serialize_intensities(intensities):
+        return [{
+            'line': sig.metadata.get_item('Sample.xray_lines')[0],
+            'value': float(np.asarray(sig.data).ravel()[0]),
+        } for sig in (intensities or [])]
+
+    @staticmethod
+    def _intensity_signals(values):
+        result = []
+        for entry in values:
+            signal = hs.signals.BaseSignal(np.asarray([entry['value']], dtype=float))
+            signal.metadata.set_item('Sample.xray_lines', [entry['line']])
+            signal.metadata.set_item('Sample.elements', [entry['line'].split('_')[0]])
+            result.append(signal)
+        return result
+
+    def _saved_fitted_intensities(self, state):
+        names = state.get('intensity_lines')
+        return self._intensity_signals([
+            {'line': comp['name'], 'value': param['value']}
+            for comp in state.get('components', [])
+            if (comp['name'] in names if names is not None else comp['name'].endswith(('_Ka', '_La', '_Ma')))
+            for param in comp['parameters'] if param['name'] == 'A'
+        ])
+
+    def get_fitted_intensity_standard_errors(self):
+        """Read amplitude errors without restoring a deferred model or fitting.
+
+        Fixed amplitudes may retain obsolete ``std`` values in HyperSpy; never
+        expose those as an uncertainty of the constrained result.
+        """
+        if self._pending_fit_state is not None:
+            return saved_amplitude_standard_errors(self._pending_fit_state.get('components', []))
+        if self._model is None:
+            return {}
+        return {
+            component.name: amplitude_standard_error(
+                free=component.A.free, std=component.A.std, twin=component.A.twin,
+                active=component.active)
+            for component in self._model if hasattr(component, 'A')
         }
 
     def _tree_to_dict(self, obj):
@@ -354,9 +476,13 @@ class EDSSpectrumRecord:
             return obj.as_dictionary()
         return obj
 
-    def _apply_serialized_state(self, state: Dict):
+    def _apply_serialized_state(self, state: Dict, *, defer_model: bool = False):
         if not isinstance(state, dict):
             return
+        version = int(state.get('version', 1))
+        if version not in (1, EDS_TOOL_STATE_VERSION):
+            raise ValueError(f"Unsupported EDS Tool snapshot version {version}: {self.path}")
+        self.plot_state = dict(state.get('plot_state', {}))
 
         defaults = state.get('defaults', {})
         self._default_energy_offset = float(defaults.get('offset', self._default_energy_offset))
@@ -415,14 +541,14 @@ class EDSSpectrumRecord:
 
         fit_state = self._tree_to_dict(state.get('fit_state'))
         if isinstance(fit_state, dict):
-            self._restore_saved_model(fit_state)
+            if defer_model:
+                self._pending_fit_state = fit_state
+                self.reduced_chisq = fit_state.get('reduced_chisq')
+                self.fitted_intensities = self._saved_fitted_intensities(fit_state)
+            else:
+                self._restore_saved_model(fit_state)
+        self.intensities = self._intensity_signals(state.get('summed_intensities', [])) or None
         self._refresh_display_signal_cache()
-
-    def _restore_from_saved_state_if_present(self):
-        state = self._tree_to_dict(self._signal.metadata.get_item(EDS_TOOL_STATE_KEY, default=None))
-        if not isinstance(state, dict):
-            return
-        self._apply_serialized_state(state)
 
     def _restore_saved_model(self, fit_state):
         original_elements = self.elements.copy()
@@ -434,7 +560,7 @@ class EDSSpectrumRecord:
             self.model = self._make_model(fit_signal, all_elements)
         elif self.bg_fit_mode == 'bg_spec':
             if self._background is None:
-                return
+                raise ValueError('Saved reference-background fit has no embedded background spectrum')
             self.model = self._make_model(fit_signal, original_elements)
             comp_bg = hs.model.components1D.ScalableFixedPattern(self._background_fit_signal)
             comp_bg.name = 'instrument'
@@ -445,8 +571,12 @@ class EDSSpectrumRecord:
             self.model.append(comp_bg)
             self.model.background_components.append(comp_bg)
         else:
-            return
+            raise ValueError(f'Unsupported saved background fit mode: {self.bg_fit_mode}')
 
+        saved_names = {component['name'] for component in fit_state['components']}
+        extra_components = [component for component in self.model if component.name not in saved_names]
+        if extra_components:
+            self.model.remove(extra_components)
         self._apply_serialized_model_state(fit_state)
         self.fitted_intensities = self.model.get_lines_intensity()
         self._compute_fitted_signals()
@@ -538,6 +668,10 @@ class EDSSpectrumRecord:
         return bool(set(self.elements) & set(self.bg_elements))
 
     def can_use_fitted_reference_bg_subtraction(self) -> bool:
+        if self._pending_fit_state is not None:
+            if self.bg_fit_mode == 'bg_spec':
+                return self._background is not None
+            return self.bg_fit_mode == 'bg_elements' and bool(self.bg_elements) and not self.has_bg_element_overlap()
         if self.model is None or self.fitted_reference_bg_signal is None:
             return False
         if self.bg_fit_mode == 'bg_spec':
@@ -571,6 +705,8 @@ class EDSSpectrumRecord:
 
     def _refresh_display_signal_cache(self):
         self._normalize_signal_modes()
+        if self._pending_fit_state is not None and self.display_signal_mode == 'fitted_reference_bg_subtracted':
+            return  # The first actual data/plot request materializes the model.
         display_signal = self.get_signal_for_display()
         self._sync_signal_proxy(self.signal, display_signal)
 
@@ -599,6 +735,8 @@ class EDSSpectrumRecord:
         if mode == 'measured_bg_subtracted':
             return self._make_signal_from_counts(self._get_measured_bg_counts(), unit, mode)
         if mode == 'fitted_reference_bg_subtracted':
+            if self._pending_fit_state is not None:
+                self.model  # materialize the saved model and derived signals
             self._validate_signal_mode(mode)
             return self._make_signal_from_cps(self.fitted_reference_clean_signal.data, unit, mode)
         raise ValueError(f"Unknown signal mode: {mode}")
@@ -613,7 +751,7 @@ class EDSSpectrumRecord:
         return self._get_signal_for_mode(self.peak_sum_signal_mode, unit=unit)
 
     def uses_model_plot(self) -> bool:
-        return self.model is not None and self.display_signal_mode in ('raw', 'fitted_reference_bg_subtracted')
+        return self.has_fit and self.display_signal_mode in ('raw', 'fitted_reference_bg_subtracted')
 
     def _get_reference_bg_data_for_plot(self):
         if self.signal_bg is None:
@@ -755,6 +893,11 @@ class EDSSpectrumRecord:
     def _print_fit_banner(self, action: str):
         print(f"\n=== {action} {self.name} ===")
 
+    def _fit_log(self, message):
+        print(message)
+        if self.progress_callback:
+            self.progress_callback(message)
+
     def apply_calibration(self, offset=None, resolution=None, reference_bg_shift=None, refit_model=False):
         if offset is not None:
             self._set_signal_calibration(self._signal, offset=offset)
@@ -772,16 +915,22 @@ class EDSSpectrumRecord:
         if refit_model and self.model is not None:
             self.fit_model()
     
-    def export(self, folder: Optional[str] = None, formats: list | str | tuple = ('csv', 'mas')):
+    def export(self, folder: Optional[str] = None, formats: list | str | tuple = ('csv', 'mas'), progress=None):
         if isinstance(formats, str):
             formats = [formats]
             
         folder = folder if folder is not None else os.path.dirname(self.path)
         os.makedirs(folder, exist_ok=True)
-        export_signal = self.get_signal_for_export()
+        export_signal = None
              
-        for fmt in formats:
+        for index, fmt in enumerate(formats):
+            if progress:
+                progress(index, len(formats), f'Saving {self.name}: {fmt}')
             fmt_lower = fmt.lower()
+            if self.progress_callback:
+                self.progress_callback(f'Saving {self.name}: {fmt_lower}')
+            if fmt_lower != 'hspy' and export_signal is None:
+                export_signal = self.get_signal_for_export()
             if fmt_lower == 'csv':
                 import pandas as pd
                 energy = export_signal.axes_manager['Energy'].axis.round(6)
@@ -809,6 +958,9 @@ class EDSSpectrumRecord:
                 target = os.path.join(folder, f"{self.name}.{fmt}")                
                 if os.path.exists(target): os.remove(target)
                 export_signal.save(target)
+
+        if progress:
+            progress(len(formats), len(formats), f'Saved {self.name}')
 
     def export_intensities_csv(self, folder: Optional[str] = None):
         """Export computed intensities to a CSV file in the same folder as the spectrum."""
@@ -868,7 +1020,8 @@ class EDSSpectrumRecord:
             # Save in all requested formats
             for fmt in formats:
                 target = os.path.join(folder, f"{self.name}.{fmt}")
-                fig.savefig(target, dpi=150, bbox_inches='tight')
+                with fig.canvas.callbacks.blocked(signal='draw_event'):
+                    fig.savefig(target, dpi=150, bbox_inches='tight')
             
             # Close the plot
             plt.close(fig)
@@ -987,7 +1140,7 @@ class EDSSpectrumRecord:
                 existing_model=self.model,
                 reuse_existing_model=(self.model is not None and not rebuild_model),
                 store_prefix=f"{self.name}_fit",
-                logger=print,
+                logger=self._fit_log,
             )
             self._apply_protocol_fit_result(result)
         except Exception as e:
@@ -1030,7 +1183,7 @@ class EDSSpectrumRecord:
                 bg_elements=self.bg_elements,
                 reference_bg_shift_keV=self.reference_bg_shift,
                 store_prefix=f"{self.name}_refine",
-                logger=print,
+                logger=self._fit_log,
             )
             self._apply_protocol_fit_result(result)
             final_chisq = self.reduced_chisq if self.reduced_chisq is not None else initial_chisq
@@ -1112,6 +1265,8 @@ class EDSSpectrumRecord:
         display_elements_override: Optional[List[str]] = None,
         **kwargs
     ):
+        if self._pending_fit_state is not None:
+            self.model  # Only the selected spectrum needs a live exSpy model.
         # Save axis limits if ax is supplied
         xlim = ylim = yscale = None
         if ax is not None:
@@ -1229,6 +1384,11 @@ class EDSSpectrumRecord:
     def get_metadata(self) -> Dict:
         return self._signal.metadata.as_dictionary()
 
+    def set_cap_metadata(self, payload):
+        """Attach source columns to spectrum signals; saved snapshots retain them."""
+        for signal in (self._signal, self._fit_signal, self.signal):
+            signal.metadata.set_item(CAP_METADATA_KEY, payload)
+
     def get_live_time(self, signal=None) -> Optional[float]:
         """Get measurement live time from metadata, or None if missing."""
         sig = signal if signal is not None else self._signal
@@ -1294,6 +1454,8 @@ class EDSSpectrumRecord:
     def set_bg_elements(self, elements: List[str], refit_if_needed: bool = True, reuse_existing_model: bool = True):
         """Set background elements (used in bg_elements fit mode)."""
         if elements != self.bg_elements:
+            if self._pending_fit_state is not None:
+                self.model  # restore with the original component list first
             self.bg_elements = elements
             # If a fit exists and we're in bg_elements mode, refit with new BG elements
             if self.model is not None and self.bg_fit_mode == 'bg_elements' and refit_if_needed:
@@ -1339,14 +1501,32 @@ class EDSSpectrumRecord:
 
 class EDSSession:
     def __init__(self, paths: Optional[List[str]] = None):
+        self.progress_callback = None
         self.records: Dict[str, EDSSpectrumRecord] = {}
         self.active_name: Optional[str] = None
         self.display_signal_mode_default: str = 'raw'
         self.peak_sum_signal_mode_default: str = 'raw'
+        self.load_warnings = []
         if paths:
             self.load(paths)
 
-    def load(self, paths: List[str]):
+    def load(self, paths: List[str], progress=None):
+        """Import snapshots unchanged; apply session defaults only to raw files.
+
+        Saved parameters/results are available immediately. A live exSpy model
+        is restored on first use, not for every spectrum during directory scan.
+        ``progress(done, total, path)`` may return False to cancel between files.
+        """
+        expanded, cap_metadata = [], {}
+        self.load_warnings = []
+        for path in paths:
+            if Path(path).suffix.lower() == '.csv':
+                spectra, rows, missing = read_cap_export(path)
+                expanded.extend(spectra)
+                cap_metadata.update(rows)
+                self.load_warnings.extend(missing)
+            else:
+                expanded.append(path)
         # Copy settings from the first existing record if available
         existing_elements = None
         bg_signal = None
@@ -1374,42 +1554,61 @@ class EDSSession:
             fit_energy_max_keV = first_rec.fit_energy_max_keV
             reference_bg_ignore_sample_half_width_keV = first_rec.reference_bg_ignore_sample_half_width_keV
 
-        for rec in [EDSSpectrumRecord(p) for p in _dedupe_preferred_spectrum_paths(paths)]:
+        preferred_paths = _dedupe_preferred_spectrum_paths(expanded)
+        for index, path in enumerate(preferred_paths):
+            if progress is not None and progress(index, len(preferred_paths), path) is False:
+                break
+            # Avoid rebuilding a snapshot merely to discover it is a duplicate.
+            if Path(path).stem in self.records:
+                existing = self.records[Path(path).stem]
+                if Path(existing.path).resolve() == Path(path).resolve() and path in cap_metadata:
+                    existing.set_cap_metadata(cap_metadata[path])
+                continue
+            rec = EDSSpectrumRecord(path, defer_model=True)
+            if path in cap_metadata:
+                rec.set_cap_metadata(cap_metadata[path])
             if rec.name in self.records:
                 print(f"Warning: Spectrum '{rec.name}' already loaded, skipping.")
                 continue
             
-            # Apply settings from existing records
-            if existing_elements:
-                rec.set_elements(existing_elements)
-            if bg_signal is not None:
-                rec.set_background(bg_signal)
-            
-            # Set background handling settings
-            rec.bg_elements = bg_elements
-            rec.bg_fit_mode = bg_fit_mode
-            rec.set_background_polynomial_order(background_polynomial_order)
-            rec.set_fit_energy_range(fit_energy_min_keV, fit_energy_max_keV)
-            rec.set_reference_bg_ignore_sample_half_width(reference_bg_ignore_sample_half_width_keV)
-            rec.set_unit(unit)
-            for mode, setter in (
-                (display_signal_mode, rec.set_display_signal_mode),
-                (peak_sum_signal_mode, rec.set_peak_sum_signal_mode),
-            ):
-                try:
-                    setter(mode)
-                except ValueError:
-                    setter('raw')
-            
-            if bg_file:
-                rec.bg_file = bg_file
+            if not rec.has_saved_state:
+                if existing_elements:
+                    rec.set_elements(existing_elements)
+                if bg_signal is not None:
+                    rec.set_background(bg_signal)
+                rec.bg_elements = list(bg_elements)
+                rec.bg_fit_mode = bg_fit_mode
+                rec.set_background_polynomial_order(background_polynomial_order)
+                rec.set_fit_energy_range(fit_energy_min_keV, fit_energy_max_keV)
+                rec.set_reference_bg_ignore_sample_half_width(reference_bg_ignore_sample_half_width_keV)
+                rec.set_unit(unit)
+                for mode, setter in (
+                    (display_signal_mode, rec.set_display_signal_mode),
+                    (peak_sum_signal_mode, rec.set_peak_sum_signal_mode),
+                ):
+                    try:
+                        setter(mode)
+                    except ValueError:
+                        setter('raw')
+                if bg_file:
+                    rec.bg_file = bg_file
             self.records[rec.name] = rec
+            if self.active_name is None:
+                self.active_name = rec.name
+                self.display_signal_mode_default = rec.display_signal_mode
+                self.peak_sum_signal_mode_default = rec.peak_sum_signal_mode
         if self.records and self.active_name is None:
             self.active_name = next(iter(self.records))
+            self.display_signal_mode_default = self.active_record.display_signal_mode
+            self.peak_sum_signal_mode_default = self.active_record.peak_sum_signal_mode
             
     def export_all(self, folder: Optional[str] = None, formats: list | str | tuple = ('csv', 'mas')):
-        for rec in self.records.values():
+        for index, rec in enumerate(self.records.values()):
+            if self.progress_callback:
+                self.progress_callback(index, len(self.records), f'Saving {rec.name}')
             rec.export(folder=folder, formats=formats)
+        if self.progress_callback:
+            self.progress_callback(len(self.records), len(self.records), 'Saved all spectra')
 
     def export_intensity_table(self, folder: str, fitted=False):
         """Export intensity table to CSV file."""
@@ -1429,13 +1628,20 @@ class EDSSession:
         os.makedirs(folder, exist_ok=True)
         filename = "fitted_intensities.csv" if fitted else "summed_intensities.csv"
         filepath = os.path.join(folder, filename)
-        pivot.to_csv(filepath)
+        if fitted:
+            intervals = df.pivot(index='spectrum', columns='line', values='standard_error')
+            write_fitted_intensity_csv(filepath, list(pivot.columns), pivot.to_dict(orient='index'),
+                                       intervals.to_dict(orient='index'), spectrum_header='spectrum')
+        else:
+            pivot.to_csv(filepath)
         print(f"Intensity table exported to: {filepath}")
 
     def set_elements(self, elements: List[str]):
         to_refit = []
         for rec in self.records.values():
-            had_model = rec.model is not None
+            if list(elements) == rec.elements:
+                continue
+            had_model = rec.has_fit
             rec.set_elements(elements, refit_if_needed=False)
             if had_model:
                 to_refit.append(rec)
@@ -1459,6 +1665,8 @@ class EDSSession:
             rec.compute_intensities()
 
     def _run_records_in_parallel(self, task: str, records: List[EDSSpectrumRecord]):
+        if self.progress_callback:
+            self.progress_callback(0, len(records), task)
         if not records:
             return
         if task == 'fit':
@@ -1470,8 +1678,10 @@ class EDSSession:
             # every worker must cold-import the full scientific stack.
             # Until model-template reuse is implemented, plain sequential
             # fitting is the most reliable and fastest path for batch fits.
-            for rec in records:
+            for index, rec in enumerate(records):
                 rec.fit_model()
+                if self.progress_callback:
+                    self.progress_callback(index + 1, len(records), f'Fitted {rec.name}')
             return
         if len(records) == 1:
             rec = records[0]
@@ -1479,6 +1689,8 @@ class EDSSession:
                 rec.fine_tune_model()
             elif task == 'refit_existing_model' and rec.model is not None:
                 rec.fit_model(rebuild_model=False)
+            if self.progress_callback:
+                self.progress_callback(1, 1, task)
             return
 
         worker_cap = (
@@ -1488,11 +1700,13 @@ class EDSSession:
         )
         max_workers = min(len(records), os.cpu_count() or 1, worker_cap)
         if max_workers <= 1:
-            for rec in records:
+            for index, rec in enumerate(records):
                 if task == 'refine' and rec.model is not None:
                     rec.fine_tune_model()
                 elif task == 'refit_existing_model' and rec.model is not None:
                     rec.fit_model(rebuild_model=False)
+                if self.progress_callback:
+                    self.progress_callback(index + 1, len(records), task)
             return
 
         def _run_local(rec: EDSSpectrumRecord):
@@ -1510,8 +1724,10 @@ class EDSSession:
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(_run_local, rec) for rec in records]
-            for future in as_completed(futures):
+            for completed, future in enumerate(as_completed(futures), 1):
                 result = future.result()
+                if self.progress_callback:
+                    self.progress_callback(completed, len(records), task)
                 if result.get('error'):
                     raise RuntimeError(result['error'])
 
@@ -1551,14 +1767,18 @@ class EDSSession:
             intensities = rec.fitted_intensities if fitted else rec.intensities
             if intensities is None:
                 continue
+            uncertainties = rec.get_fitted_intensity_standard_errors() if fitted else {}
             for sig in intensities:
                 line = sig.metadata.get_item('Sample.xray_lines')[0]
                 val = sig.data[0] if hasattr(sig.data, "__getitem__") else sig.data
-                table.append({
+                entry = {
                     "spectrum": rec.name,
                     "line": line,
                     "intensity": float(val)
-                })
+                }
+                if fitted:
+                    entry['standard_error'] = uncertainties.get(line, float('nan'))
+                table.append(entry)
         return table
 
     def get_metadata(self) -> List[Dict]:

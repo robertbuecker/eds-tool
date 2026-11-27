@@ -10,6 +10,7 @@ EDS Tool is a HyperSpy/exSpy based application for interactive and batch
 analysis of TEM EDS spectra. It supports:
 
 - Loading one or many `.eds` or `.hspy` spectra.
+- Loading spectra listed by a CAP Data Explorer CSV, retaining source columns.
 - Managing sample elements and optional reference/background information.
 - Fitting EDS line models with a polynomial baseline and optional reference
   background spectrum.
@@ -38,6 +39,13 @@ Responsibilities:
 The GUI must not contain fitting logic. It should expose state and call the
 business objects.
 
+`eds_startup.py` suppresses routine library import chatter using a context
+manager that always restores stderr. Failed imports keep their original
+exception/traceback and write `eds_tool_startup_error.log` in the temporary
+directory. Direct GUI/frozen startup also reports the failure using a native
+Windows error dialog, which works even if Qt itself cannot load. Optional Qt
+import errors retain their cause for the GUI startup check.
+
 ### `eds_session.py`
 
 Business layer for spectra and sessions.
@@ -65,6 +73,56 @@ Responsibilities:
   per-step function-evaluation counts, and screening decisions.
 
 New fitting work should start here, not inside the GUI.
+
+### `eds_auto.py`
+
+Guarded `--auto --fit` orchestration, CPS fit-quality diagnostics, first-spectrum
+calibration/refinement and transfer to subsequent fits, and headless fitted
+figure saving. Poor fits are warned about and cancelled, not silently masked.
+Diagnostics and limits are documented in `AUTO_WORKFLOW_README.md`. Each attempt
+writes JSON decisions, timings, nfev and between-peak residual metrics. Rejected
+models are cleared; a rejected first calibration stops the batch. Auto-mode
+optimizer calls use an optional 200-evaluation budget in the protocol config;
+normal GUI fitting defaults are unchanged.
+
+GUI fitting/saving uses modal QProgressDialog bars. Known file/spectrum totals
+advance on completion; individual fitting stages show a busy indicator and
+stage text. Session completion callbacks execute on the caller thread; worker
+fit log callbacks never manipulate Qt widgets. Callbacks/cursors are restored
+even after failures. Image saves report per-format or per-spectrum completion.
+
+### `eds_plot_export.py`
+
+Interactive plot-image export and fit annotation layout. Saves the actual
+displayed Matplotlib artists with an extra footer; retains physical axes size,
+limits, scales, legends, and overlays. Uses a temporary Agg canvas and restores
+the original canvas, layout, and positions even after a save error. HyperSpy
+blit callbacks are blocked during vector saves. Small outer padding prevents
+axis decorations being clipped without shrinking the axes.
+
+Batch image export applies the active display mode, unit, overlay controls,
+X limits, scales, and figure/axes size to each spectrum. The user chooses fixed
+Y limits or per-spectrum scaling within the visible X range. It keeps the
+active plot alive and restores record settings. An unavailable background view
+is reported for that record, rather than silently changing subtraction mode.
+
+### `eds_cap_import.py`
+
+Reads CAP Data Explorer CSV files with or without their VERSION/header
+preamble. Finds `Experiment_name`, preserves every column value as text, and
+pads short rows with empty strings. Resolves
+`<CSV folder>/<experiment>/EDS/<experiment>_edsauto.{hspy,eds}` first, then
+`Experiment_path/EDS/...`, preferring saved HSPY over EDS within each location.
+This permits moving the CSV together with its experiment folders. Does not
+scan recursively or load spectra while resolving rows. Missing files are
+reported; duplicate/invalid experiment names and malformed headers are errors.
+
+`EDSSession.load()` accepts explicit CAP CSV paths through the same interface
+as spectrum paths. It stores provenance and all original columns in
+`Signal.metadata.CAP_Data_Explorer` (`source_file`, `row_number`, `columns`).
+Metadata is attached to source, fit and display signals and retained in HSPY
+saves. An already-open matching spectrum can be enriched without reloading or
+refitting it. Directory scans still discover only spectra, not unrelated CSVs.
 
 ### `tests/`
 
@@ -95,6 +153,8 @@ Each record keeps distinct signal roles:
 Model and result fields:
 
 - `model`: exSpy `EDSTEMModel` fitted on `_fit_signal`.
+- `has_fit`: availability check that does not materialize a saved model.
+- `_pending_fit_state`: saved parameters awaiting first actual model use.
 - `intensities`: peak-sum intensities from the selected peak-sum source.
 - `fitted_intensities`: model-derived intensities from `model.get_lines_intensity()`.
 - `fitted_reference_bg_signal`: fitted reference-background contribution in CPS.
@@ -296,7 +356,7 @@ is a clear reason not to.
 
 The control window is divided into:
 
-- Spectrum Management: loaded spectra, add/remove/export actions, export format.
+- Spectrum Management: loaded spectra, add/remove/save actions, save formats.
 - Elements and Background: sample elements, background modeling mode,
   background elements, reference-background file.
 - Fitting and Quantification: selected/all actions for peak sums, model fits,
@@ -306,11 +366,45 @@ The control window is divided into:
 
 The loaded-spectrum list is expected to hold many spectra. Keep it usable and do
 not sacrifice it for rarely used controls.
+Adjacent file actions use compact Selected/All columns for Remove, Save
+spectra and Save plot(s), with shared spectrum/image format entries below.
+Startup height respects the layout minimum, keeping actions visible without
+reducing the loaded-spectrum list to make room for a vertical button stack.
+
+Summed and fitted intensity dialogs select whole rows by spectrum identity.
+Selecting a row changes the active control-window row and displayed spectrum;
+control-window selection updates both tables. Programmatic selection is signal
+blocked to avoid navigation loops. Normalization/column changes preserve the
+selection. Tables without a result for the active spectrum clear selection.
 
 Right-clicking the plot stages candidate elements in the element entry and plot
 markers. It does not re-fit until `Apply` is clicked.
 
-## Export and Persistence
+Fitted intensity tables show `value(SE)`, where SE is one fitted amplitude
+standard error (approximately 68% under a symmetric normal approximation).
+The uncertainty has two significant digits; the displayed value is truncated
+at the same decimal place. An explicit exponent keeps large/small uncertainties
+unambiguous. Fixed/twinned/inactive amplitudes and missing, non-finite or non-positive
+standard errors show `(NaN)`, never a misleading zero uncertainty. Tooltips
+retain unrounded values. Summed intensity tables keep their existing display.
+Normalized uncertainties use first-order ratio propagation, neglect parameter
+cross-covariances, and are labeled accordingly. A valid reference/reference
+ratio has zero uncertainty; a zero/missing reference produces unavailable data.
+
+`eds_intensity_uncertainty.py` owns shared uncertainty validation, saved-state
+extraction, notation, ratio propagation and numerical fitted CSV writing.
+`EDSSpectrumRecord.get_fitted_intensity_standard_errors()` reads live amplitude
+errors or the already-saved parameter state without restoring a deferred model.
+`EDSSession.get_intensity_table(fitted=True)` adds `standard_error` to each row.
+Both fitted-table Save CSV and session fitted CSV exports preserve full numeric
+precision and place `<line>_standard_error` beside each `<line>` value, with
+literal `NaN` for unavailable errors or missing lines. The dialog exports its
+selected lines and current normalization. The existing HSPY parameter `std`
+fields provide uncertainty persistence; old snapshots without them remain
+readable with unavailable errors. No fitting or snapshot schema change is
+needed. Spectrum-channel CSVs are independent of fitted-intensity CSVs.
+
+## Saving and Persistence
 
 Supported exports include:
 
@@ -318,9 +412,56 @@ Supported exports include:
 - Intensity tables.
 - Plot images through HyperSpy/Matplotlib.
 
+The GUI provides `Save plot` (Selected) and `Save plots` (All) alongside a
+separate comma-separated plot-format field (default `png, svg`). These write
+`<spectrum name>.<format>` beside each source file, replacing existing images.
+Selected save takes one click; All asks about Y rescaling and supports
+Cancel. Spectrum-save formats and its folder dialog are independent. Existing
+Python `export*` APIs are retained for compatibility; GUI actions say Save.
+
+The image footer reports raw/subtracted display handling, fitted sample
+elements, fitted line integrals from unrounded results (CPS), background elements or
+reference file name/path/filesystem creation date, and polynomial order. If a
+normalization line is selected in the Fitted Line Intensities dialog, the footer
+adds ratios from unrounded values, explicitly naming the reference line. Missing
+or zero normalization references are reported as unavailable. Unfitted spectra
+are labeled accordingly. Interactive export does not change automatic workflow
+exports or run fitting.
+
 `.hspy` export stores the original count signal plus EDS Tool state metadata.
 When both `.eds` and `.hspy` with the same stem are present, loading prefers
 `.hspy`.
+
+Snapshot import preserves per-record saved settings, even in an existing
+session with different elements/background/defaults. Unsaved raw files still
+inherit session settings. Import never applies the GUI element entry or starts
+a fit. Duplicate records are detected before reopening their files.
+
+`EDSSession.load()` imports records incrementally with an optional progress
+callback and defers model construction. Elements, chi2r, and fitted integrals
+are available immediately; accessing `record.model` or plotting that record
+restores its live CPS model. Use `record.has_fit` for availability checks and
+result-table population. Direct `EDSSpectrumRecord(path)` remains eager by
+default; pass `defer_model=True` for deferred construction. GUI import shows
+progress with cancellation between files. Models are not fitted on restore.
+
+Transport-only `EDS_Tool.state` metadata is extracted before copying working
+signals. It contains an embedded reference spectrum and must not be carried
+through every HyperSpy slice or intensity calculation.
+
+Version 2 snapshots preserve component activation, parameter values/errors,
+free/fixed flags, bounds, twin relationships and their expressions, channel
+masks, native chi-square/degrees of freedom, summed intensities, calibrated
+axes/resolution, embedded background, and GUI view settings (overlays, X/Y
+limits, Y scale, X-range preset and normalization line). GUI spectrum export
+captures the current view; headless export retains any stored view. Fitted
+tables align lines by name for mixed-element snapshots and use unrounded
+intensities. Version 1 files remain supported; missing native diagnostics are
+reconstructed from CPS data, without fitting. Settings never stored by version
+1 (such as overlay visibility) cannot be recovered retrospectively.
+
+CLI startup preserves saved detector resolution unless `--energy-resolution`
+is explicitly supplied. Raw files retain the 128 eV default.
 
 ## Distribution
 
@@ -371,6 +512,14 @@ or run `rebuild_cx.bat`.
 ## Performance Notes
 
 - Use `scripts/with-eds-mini.ps1` for all Python commands.
+- The existing scientific/Qt stack in `eds-mini` is pip-managed. On
+  2026-11-27 a Conda scikit-learn installation was rolled back because it
+  overlaid pip NumPy/SciPy files and introduced an incompatible ICU DLL used
+  by Qt. NumPy 2.3.4, SciPy 1.16.2 and cloudpickle 3.1.1 were restored from
+  pip wheels; scikit-learn 1.9.1 and its pure-Python dependencies were installed
+  through pip. Install additions to this stack through the activated Python's
+  pip rather than overlaying it with Conda scientific packages. The earlier
+  Conda ipykernel installation was retained.
 - The fit protocol temporarily limits numexpr to one thread for small 1D fits.
 - Multiprocessing was not useful for normal batch fitting on Windows because
   process startup and scientific-stack import dominate.

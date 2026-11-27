@@ -64,6 +64,7 @@ class FittingProtocolConfig:
     low_energy_peak_screening_integration_windows: float = 2.0
     low_energy_peak_screening_background_line_width: tuple[float, float] = (2.0, 2.0)
     low_energy_peak_screening_background_windows_width: float = 1.0
+    max_nfev: int | None = None
 
 
 @dataclass
@@ -734,7 +735,12 @@ class _SpectrumFitProtocol:
             parameter.bmax = bmax
 
     def _fit_current_model(self, step_name: str, **kwargs):
+        if self.config.max_nfev is not None:
+            budget_key = 'maxfev' if kwargs.get('optimizer', 'lm') == 'lm' else 'max_nfev'
+            kwargs.setdefault(budget_key, self.config.max_nfev)
         info = self.model.fit(return_info=True, **kwargs)
+        if self.config.max_nfev is not None and isinstance(info, dict) and info.get('success') is False:
+            raise RuntimeError(f'{step_name} did not converge: {info.get("message", "evaluation limit")}')
         key = self._unique_step_name(step_name)
         self.nfev_by_step[key] = self._fit_info_nfev(info)
         self._last_fit_step_name = key

@@ -1,3 +1,5 @@
+* Collapsible boxes
+
 **Fitting**
 * Provide library of standard backgrounds for different holders/grids
 * How can we speed up typical workflows for fitting

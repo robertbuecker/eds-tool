@@ -4,34 +4,33 @@ import logging
 import os
 from typing import Optional, List
 import io
+from eds_startup import startup_imports, report_startup_failure
 
 # Suppress all warnings and logging
 warnings.filterwarnings('ignore')
 logging.disable(logging.WARNING)
 
-# Redirect stderr during imports to suppress hyperspy/rsciio numba warnings
-_stderr_backup = sys.stderr
-sys.stderr = io.StringIO()
+# Suppress import warnings, but always restore stderr on an actual failure.
+_show_startup_dialog = (__name__ == '__main__' or getattr(sys, 'frozen', False)) and '--auto' not in sys.argv
+with startup_imports(show_dialog=_show_startup_dialog):
+    import matplotlib
+    import argparse
+    from pathlib import Path
+    from eds_session import EDSSession, _dedupe_preferred_spectrum_paths
+    from eds_plot_export import save_displayed_plot, save_all_displayed_plots
 
-import matplotlib
-import os
-import argparse
-from pathlib import Path
-from eds_session import EDSSession, _dedupe_preferred_spectrum_paths
-
-# GUI imports - only used when not in auto mode, but needed for class definition
-try:
-    from qtpy import QtWidgets, QtCore
-    from qtpy.QtGui import QIcon
-    from intensity_table_dialog import IntensityTableDialog
-    import matplotlib.pyplot as plt
-    import exspy
-    GUI_AVAILABLE = True
-except ImportError:
-    GUI_AVAILABLE = False
-
-# Restore stderr after imports
-sys.stderr = _stderr_backup
+    # GUI imports are optional for the command-line automatic workflow.
+    GUI_IMPORT_ERROR = None
+    try:
+        from qtpy import QtWidgets, QtCore
+        from qtpy.QtGui import QIcon
+        from intensity_table_dialog import IntensityTableDialog
+        import matplotlib.pyplot as plt
+        import exspy
+        GUI_AVAILABLE = True
+    except ImportError as error:
+        GUI_AVAILABLE = False
+        GUI_IMPORT_ERROR = error
 
 def _resolve_icon_path() -> Optional[str]:
     candidates = []
@@ -108,24 +107,23 @@ def collect_preferred_spectrum_paths(entries: List[str]) -> List[str]:
             gathered.extend(str(path) for path in root.rglob(pattern))
     return _dedupe_preferred_spectrum_paths(gathered)
 
-def auto_workflow(session: EDSSession, max_energy: Optional[float] = None, use_cps: bool = False):
+def auto_workflow(session: EDSSession, max_energy: Optional[float] = None, use_cps: bool = False, fit=False):
     """
     Automatic workflow for EDS analysis without GUI.
     
     Steps:
     1. Set units (counts or CPS)
     2. Compute intensities for all spectra (using summing, not fitting)
-    3. Export spectra in configured formats (EMSA, CSV by default)
-    4. Export plots in configured formats (PNG, SVG, JPG by default)
-    5. Export intensity table to the longest common folder
+    3. Save spectra in configured formats (EMSA, CSV by default)
+    4. Save plots in configured formats (PNG, SVG, JPG by default)
+    5. Save intensity table to the longest common folder
     """
     # Suppress stderr during exspy import to hide numba warnings
-    _stderr_backup = sys.stderr
-    sys.stderr = io.StringIO()
-    import exspy
-    sys.stderr = _stderr_backup
+    with startup_imports():
+        import exspy
     
     print("Running automatic EDS workflow...")
+    errors = []
     
     # Set units
     unit = "cps" if use_cps else "counts"
@@ -134,7 +132,13 @@ def auto_workflow(session: EDSSession, max_energy: Optional[float] = None, use_c
     
     if not session.records:
         print("Error: No spectra loaded. Please provide spectrum files or directories.")
-        return
+        return False
+
+    if fit:
+        from eds_auto import fit_automatically, save_fit_plot
+        reports = fit_automatically(session)
+        if not reports or not reports[0]['accepted']:
+            return False
     
     # Step 1: Compute intensities for all spectra
     print(f"\n1. Computing intensities for {len(session.records)} spectra...")
@@ -144,36 +148,42 @@ def auto_workflow(session: EDSSession, max_energy: Optional[float] = None, use_c
     computed_count = sum(1 for rec in session.records.values() if rec.intensities is not None)
     print(f"   Intensities computed for {computed_count}/{len(session.records)} spectra.")
     
-    # Step 2: Export spectra
-    print(f"\n2. Exporting spectra in formats: {', '.join(AUTO_SPECTRUM_FORMATS)}...")
+    # Step 2: Save spectra
+    print(f"\n2. Saving spectra in formats: {', '.join(AUTO_SPECTRUM_FORMATS)}...")
     for rec in session.records.values():
         try:
             rec.export(formats=AUTO_SPECTRUM_FORMATS)
-            print(f"   Exported: {rec.name}")
+            print(f"   Saved: {rec.name}")
         except Exception as e:
             print(f"   Error exporting {rec.name}: {e}")
+            errors.append(str(e))
     
-    # Step 3: Export plots
-    print(f"\n3. Exporting plots in formats: {', '.join(AUTO_PLOT_FORMATS)}...")
+    # Step 3: Save plots
+    print(f"\n3. Saving plots in formats: {', '.join(AUTO_PLOT_FORMATS)}...")
     for rec in session.records.values():
         try:
-            rec.export_plot(formats=AUTO_PLOT_FORMATS, max_energy=max_energy)
+            if fit and rec.has_fit:
+                save_fit_plot(rec, formats=AUTO_PLOT_FORMATS, max_energy=max_energy)
+            else:
+                rec.export_plot(formats=AUTO_PLOT_FORMATS, max_energy=max_energy)
             print(f"   Plotted: {rec.name}")
         except Exception as e:
             print(f"   Error plotting {rec.name}: {e}")
+            errors.append(str(e))
     
-    # Step 4: Export individual intensity CSVs
-    print("\n4. Exporting individual intensity files...")
+    # Step 4: Save individual intensity CSVs
+    print("\n4. Saving individual intensity files...")
     for rec in session.records.values():
         if rec.intensities:
             try:
                 rec.export_intensities_csv()
-                print(f"   Exported intensities: {rec.name}")
+                print(f"   Saved intensities: {rec.name}")
             except Exception as e:
                 print(f"   Error exporting intensities for {rec.name}: {e}")
+                errors.append(str(e))
     
-    # Step 5: Export intensity table to longest common folder
-    print("\n5. Exporting combined intensity table...")
+    # Step 5: Save intensity table to longest common folder
+    print("\n5. Saving combined intensity table...")
     if len(session.records) > 1:
         try:
             common_folder = os.path.commonpath([rec.path for rec in session.records.values()])
@@ -187,12 +197,16 @@ def auto_workflow(session: EDSSession, max_energy: Optional[float] = None, use_c
     if common_folder:
         try:
             session.export_intensity_table(common_folder, fitted=False)
+            if fit:
+                session.export_intensity_table(common_folder, fitted=True)
         except Exception as e:
             print(f"   Error exporting intensity table: {e}")
+            errors.append(str(e))
     else:
         print("   Warning: Could not determine common folder for intensity table.")
     
     print("\nAutomatic workflow completed!")
+    return not errors and (not fit or all(report['accepted'] for report in reports))
 
 class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
     def __init__(self, session: EDSSession):
@@ -207,6 +221,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self.table_views: dict[str, QtWidgets.QDialog] = {}
         self._pending_first_show_layout_fix = True
         self._plot_initialized = False
+        self._plot_state_to_restore = dict(session.active_record.plot_state) if session.active_record else {}
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
@@ -255,45 +270,61 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         spectrum_body.addWidget(self.list, 1)
 
         spectrum_actions_widget = QtWidgets.QWidget()
-        spectrum_actions_widget.setMinimumWidth(170)
-        spectrum_actions_widget.setMaximumWidth(190)
+        self.spectrum_actions_widget = spectrum_actions_widget
+        spectrum_actions_widget.setMinimumWidth(180)
+        spectrum_actions_widget.setMaximumWidth(210)
         spectrum_actions_widget.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
         spectrum_actions = QtWidgets.QVBoxLayout(spectrum_actions_widget)
         spectrum_actions.setContentsMargins(0, 0, 0, 0)
-        spectrum_actions.setSpacing(6)
+        spectrum_actions.setSpacing(4)
 
-        self.remove_spec_btn = QtWidgets.QPushButton("Remove Selected")
-        self.remove_all_btn = QtWidgets.QPushButton("Remove All")
-        self.remove_spec_btn.setMinimumHeight(28)
-        self.remove_all_btn.setMinimumHeight(28)
-        self.add_file_btn.setMinimumHeight(28)
-        self.add_dir_btn.setMinimumHeight(28)
+        self.remove_spec_btn = QtWidgets.QPushButton("Remove")
+        self.remove_all_btn = QtWidgets.QPushButton("Remove")
+        self.add_dir_btn.setText("Add Directory")
+        self.add_dir_btn.setToolTip("Add spectra recursively from a directory")
+        self.add_file_btn.setToolTip("Open an EDS/HyperSpy spectrum or a CAP Data Explorer CSV")
         spectrum_actions.addWidget(self.add_file_btn)
         spectrum_actions.addWidget(self.add_dir_btn)
-        spectrum_actions.addSpacing(4)
-        spectrum_actions.addWidget(self.remove_spec_btn)
-        spectrum_actions.addWidget(self.remove_all_btn)
         self.remove_spec_btn.clicked.connect(self.remove_selected_spectrum)
         self.remove_all_btn.clicked.connect(self.remove_all_spectra)
 
-        self.export_selected_btn = QtWidgets.QPushButton("Export Selected")
-        self.export_all_btn = QtWidgets.QPushButton("Export All")
-        self.export_selected_btn.setMinimumHeight(28)
-        self.export_all_btn.setMinimumHeight(28)
-        spectrum_actions.addSpacing(4)
-        spectrum_actions.addWidget(self.export_selected_btn)
-        spectrum_actions.addWidget(self.export_all_btn)
+        self.export_selected_btn = QtWidgets.QPushButton("Save spectra")
+        self.export_all_btn = QtWidgets.QPushButton("Save spectra")
         self.export_selected_btn.clicked.connect(self.export_selected_spectrum)
         self.export_all_btn.clicked.connect(self.export_all_spectra)
 
         self.ask_folder_checkbox = QtWidgets.QCheckBox("Ask for folder")
         self.format_entry = QtWidgets.QLineEdit("emsa, csv, hspy")
-        self.ask_folder_checkbox.setMinimumHeight(22)
-        self.format_entry.setMinimumHeight(26)
-        spectrum_actions.addSpacing(4)
+        self.export_plot_btn = QtWidgets.QPushButton("Save plot")
+        self.export_plots_btn = QtWidgets.QPushButton("Save plots")
+        self.plot_format_entry = QtWidgets.QLineEdit("png, svg")
+        self.plot_format_entry.setToolTip("Comma-separated image formats. Saved beside each spectrum; existing images are replaced.")
+        self.export_plot_btn.setToolTip("Save the plot as shown, with fit details below the axes, beside the EDS file.")
+        self.export_plot_btn.clicked.connect(self.export_current_plot)
+        self.export_plots_btn.clicked.connect(self.export_all_plots)
+        action_grid = QtWidgets.QGridLayout()
+        action_grid.setHorizontalSpacing(4)
+        action_grid.setVerticalSpacing(4)
+        action_grid.addWidget(QtWidgets.QLabel("Selected"), 0, 0, alignment=QtCore.Qt.AlignCenter)
+        action_grid.addWidget(QtWidgets.QLabel("All"), 0, 1, alignment=QtCore.Qt.AlignCenter)
+        for row, buttons in enumerate(((self.remove_spec_btn, self.remove_all_btn),
+                                       (self.export_selected_btn, self.export_all_btn),
+                                       (self.export_plot_btn, self.export_plots_btn)), 1):
+            for column, button in enumerate(buttons):
+                action_grid.addWidget(button, row, column)
+        action_grid.setColumnStretch(0, 1)
+        action_grid.setColumnStretch(1, 1)
+        spectrum_actions.addLayout(action_grid)
+        for button in (self.add_file_btn, self.add_dir_btn, self.remove_spec_btn, self.remove_all_btn,
+                       self.export_selected_btn, self.export_all_btn, self.export_plot_btn, self.export_plots_btn):
+            button.setMinimumHeight(24)
+        for label, entry in (("Spectra:", self.format_entry), ("Images:", self.plot_format_entry)):
+            row = QtWidgets.QHBoxLayout()
+            row.setSpacing(4)
+            row.addWidget(QtWidgets.QLabel(label))
+            row.addWidget(entry, 1)
+            spectrum_actions.addLayout(row)
         spectrum_actions.addWidget(self.ask_folder_checkbox)
-        spectrum_actions.addWidget(QtWidgets.QLabel("Formats:"))
-        spectrum_actions.addWidget(self.format_entry)
         spectrum_actions.addStretch()
 
         spectrum_body.addWidget(spectrum_actions_widget)
@@ -568,6 +599,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
 
         nav_width = max(420, min(460, int(screen_geom.width() * 0.26)))
         nav_height = max(760, min(860, int(screen_geom.height() * 0.86)))
+        nav_height = max(nav_height, layout.minimumSize().height())
         self.setMinimumSize(420, 720)
         self.resize(nav_width, nav_height)
 
@@ -604,6 +636,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             self._sync_background_mode_controls(rec)
             self._sync_display_controls(rec)
             self._sync_fit_controls(rec)
+            self._restore_plot_controls(rec)
         
     def _update_spectrum_count_label(self):
         count = len(self.session.records)
@@ -654,6 +687,25 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         if self.session.active_name == name:
             return  # No change, skip recomputation
         self.session.set_active(name)
+        self._plot_state_to_restore = dict(self.session.active_record.plot_state)
+        self._sync_active_record_controls()
+        self._sync_intensity_selection()
+        self.update_plot()
+
+    def _select_spectrum_from_table(self, name):
+        for row in range(self.list.count()):
+            if self.list.item(row).data(QtCore.Qt.UserRole) == name:
+                self.list.setCurrentRow(row)
+                return
+
+    def _sync_intensity_selection(self):
+        for dialog in self.table_views.values():
+            dialog.select_spectrum(self.session.active_name)
+
+    def _sync_active_record_controls(self, restore_plot=True):
+        """Read imported settings into controls without applying/refitting them."""
+        if self.session.active_record is None:
+            return
         
         # Update elements fields
         self.el_edit.setText(",".join(self.session.active_record.elements))
@@ -676,7 +728,8 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             self._sync_display_controls(rec)
             self._sync_fit_controls(rec)
         
-        self.update_plot()
+        if restore_plot:
+            self._restore_plot_controls(self.session.active_record)
 
     def _toggle_advanced_peak_controls(self, checked):
         self.advanced_peak_widget.setVisible(checked)
@@ -702,7 +755,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
                 "Fitted reference BG is unavailable in BG Elements mode when "
                 "background elements overlap the sample elements."
             )
-        if rec.model is None:
+        if not rec.has_fit:
             return (
                 "Fit a model to enable fitted reference BG. "
                 "Measured subtraction requires a loaded reference BG."
@@ -866,15 +919,19 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
 
         previous_effective_unit = getattr(self, "_last_effective_plot_unit", None)
 
-        fig, ax = rec.plot(
-            use_model=None,  # default: use model if available
-            ax=self.ax,
-            fig=self.fig,
-            show_residual=self.residual_checkbox.isChecked(),
-            show_background=self.background_checkbox.isChecked(),
-            show_bg_elements=self.show_bg_elements_checkbox.isChecked(),
-            display_elements_override=self._get_preview_elements_override(rec),
-        )
+        try:
+            fig, ax = rec.plot(
+                use_model=None,  # default: use model if available
+                ax=self.ax,
+                fig=self.fig,
+                show_residual=self.residual_checkbox.isChecked(),
+                show_background=self.background_checkbox.isChecked(),
+                show_bg_elements=self.show_bg_elements_checkbox.isChecked(),
+                display_elements_override=self._get_preview_elements_override(rec),
+            )
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Spectrum Plot/Restore Error", str(exc))
+            return
         
         self.fig = fig
         self.ax = ax 
@@ -889,7 +946,16 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         if previous_effective_unit is not None and previous_effective_unit != current_effective_unit:
             self.reset_y()
 
-            _set_window_icon(self.fig.canvas.manager.window)
+        if self._plot_state_to_restore:
+            state = self._plot_state_to_restore
+            self.ax.set_yscale(state.get('yscale', 'linear'))
+            if 'xlim' in state:
+                self.ax.set_xlim(state['xlim'])
+            if 'ylim' in state:
+                self.ax.set_ylim(state['ylim'])
+            self._plot_state_to_restore = {}
+
+        _set_window_icon(self.fig.canvas.manager.window)
         plt.show(block=False)
         
         # Connect right-click handler
@@ -932,27 +998,40 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self.popup.show()
 
     def _create_progress_dialog(self, title: str):
-        dialog = QtWidgets.QDialog(self)
+        dialog = QtWidgets.QProgressDialog(title, "", 0, 0, self)
         dialog.setWindowTitle(title)
         _set_window_icon(dialog)
-        dialog.setModal(False)
-        dialog.setWindowFlag(QtCore.Qt.WindowContextHelpButtonHint, False)
-        layout = QtWidgets.QVBoxLayout(dialog)
-        label = QtWidgets.QLabel("Fitting in progress\n(see command window for details)")
-        label.setAlignment(QtCore.Qt.AlignCenter)
-        layout.addWidget(label)
-        dialog.setFixedSize(280, 100)
+        dialog.setCancelButton(None)
+        dialog.setWindowModality(QtCore.Qt.ApplicationModal)
+        dialog.setMinimumDuration(0)
+        dialog.setMinimumWidth(380)
         dialog.show()
         QtWidgets.QApplication.processEvents()
         return dialog
 
     def _run_with_progress(self, title: str, callback):
         dialog = self._create_progress_dialog(title)
+        previous = self.session.progress_callback
+        previous_records = [(rec, rec.progress_callback) for rec in self.session.records.values()]
+        def report(done, total, label):
+            if QtCore.QThread.currentThread() != self.thread():
+                return
+            dialog.setLabelText(str(label))
+            if total:
+                dialog.setRange(0, total)
+                dialog.setValue(done)
+            QtWidgets.QApplication.processEvents()
         try:
+            self.session.progress_callback = report
+            for rec, _ in previous_records:
+                rec.progress_callback = lambda message: report(0, 0, message)
             QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
             QtWidgets.QApplication.processEvents()
             return callback()
         finally:
+            self.session.progress_callback = previous
+            for rec, handler in previous_records:
+                rec.progress_callback = handler
             QtWidgets.QApplication.restoreOverrideCursor()
             dialog.close()
             QtWidgets.QApplication.processEvents()
@@ -1119,7 +1198,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
 
     def fine_tune_all_refine(self):
         """Run per-spectrum refinement on all currently fitted spectra."""
-        fitted = [rec for rec in self.session.records.values() if rec.model is not None]
+        fitted = [rec for rec in self.session.records.values() if rec.has_fit]
         if not fitted:
             QtWidgets.QMessageBox.warning(
                 self, "No Fitted Models",
@@ -1139,16 +1218,27 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         self._refresh_spectrum_list()
         self.update_plot(force_replot=True)
 
-    def _show_intensity_table(self, line_names, table_data, title="Line Intensities"):
+    def _show_intensity_table(self, line_names, table_data, title="Line Intensities", confidence_intervals=None):
         geom = None
+        norm_line = None
+        if title == "Fitted Line Intensities" and self.session.active_record:
+            norm_line = self.session.active_record.plot_state.get('normalization_line')
         if title in self.table_views:
             old_dialog = self.table_views[title]
             geom = old_dialog.geometry()
+            if old_dialog.norm_idx is not None:
+                norm_line = old_dialog.line_names[old_dialog.norm_idx]
+            old_dialog.blockSignals(True)
             old_dialog.close()
-        dialog = self.table_views[title] = IntensityTableDialog(self, line_names, table_data, title=title)
+        dialog = self.table_views[title] = IntensityTableDialog(
+            self, line_names, table_data, title=title, confidence_intervals=confidence_intervals)
+        dialog.spectrum_selected.connect(self._select_spectrum_from_table)
+        if norm_line in line_names:
+            dialog._norm_radio_buttons[line_names.index(norm_line)].setChecked(True)
         if geom is not None:
             dialog.setGeometry(geom)
         dialog.show()
+        dialog.select_spectrum(self.session.active_name)
         def on_dialog_closed(result):
             if title == "Summed Line Intensities":
                 if self.show_summed_table_checkbox.isChecked():
@@ -1313,54 +1403,106 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         # Do NOT uncheck the checkbox here!
 
     def show_summed_intensity_table(self):
-        table_data = []
-        line_names = []
-        for rec in self.session.records.values():
-            if rec.intensities:
-                line_names = [sig.metadata.get_item('Sample.xray_lines')[0] for sig in rec.intensities]
-                break
-        for rec in self.session.records.values():
-            if rec.intensities:
-                row = [rec.name] + [f"{sig.data[0]:.1f}" for sig in rec.intensities]
-                table_data.append(row)
+        line_names, table_data = self._intensity_table_rows(fitted=False)
         self._show_intensity_table(line_names, table_data, title="Summed Line Intensities")
 
     def show_fitted_intensity_table(self):
-        table_data = []
-        line_names = []
-        for rec in self.session.records.values():
-            if rec.fitted_intensities:
-                line_names = [sig.metadata.get_item('Sample.xray_lines')[0] for sig in rec.fitted_intensities]
-                break
-        for rec in self.session.records.values():
-            if rec.fitted_intensities:
-                row = [rec.name] + [f"{sig.data[0]:.1f}" for sig in rec.fitted_intensities]
-                table_data.append(row)
-        self._show_intensity_table(line_names, table_data, title="Fitted Line Intensities")
+        line_names, table_data = self._intensity_table_rows(fitted=True)
+        intervals = {}
+        for entry in self.session.get_intensity_table(fitted=True):
+            intervals.setdefault(entry['spectrum'], {})[entry['line']] = entry['standard_error']
+        self._show_intensity_table(line_names, table_data, title="Fitted Line Intensities",
+                                   confidence_intervals=intervals)
+
+    def _intensity_table_rows(self, fitted):
+        entries = self.session.get_intensity_table(fitted=fitted)
+        lines = list(dict.fromkeys(entry['line'] for entry in entries))
+        rows = {}
+        for entry in entries:
+            rows.setdefault(entry['spectrum'], {})[entry['line']] = entry['intensity']
+        return lines, [[name] + [values.get(line, float('nan')) for line in lines]
+                       for name, values in rows.items()]
 
     def add_file(self):
         fname, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Add Spectrum File",
             "",
-            "Spectrum Files (*.hspy *.eds);;HyperSpy Files (*.hspy);;EDS Files (*.eds)",
+            "Spectrum / CAP Files (*.hspy *.eds *.csv);;HyperSpy Files (*.hspy);;EDS Files (*.eds);;CAP Data Explorer (*.csv)",
         )
         if fname:
-            self.session.load([fname])
-            self._refresh_spectrum_list()
-            # Optionally set elements for new spectra
-            self.apply_elements()
-            self.update_plot()
+            self._load_spectrum_paths([fname])
 
     def add_directory(self):
         dname = QtWidgets.QFileDialog.getExistingDirectory(self, "Add Directory")
         if dname:
             paths = collect_preferred_spectrum_paths([dname])
             if paths:
-                self.session.load(paths)
-                self._refresh_spectrum_list()
-                self.apply_elements()
-                self.update_plot()
+                self._load_spectrum_paths(paths)
+
+    def _load_spectrum_paths(self, paths):
+        was_empty = not self.session.records
+        progress = QtWidgets.QProgressDialog("Loading spectra...", "Cancel", 0, len(paths), self)
+        progress.setWindowTitle("Load Spectra")
+        progress.setWindowModality(QtCore.Qt.ApplicationModal)
+        progress.setMinimumDuration(0)
+
+        def report(done, total, path):
+            progress.setMaximum(total)
+            progress.setValue(done)
+            progress.setLabelText(f"Loading {done + 1}/{total}: {os.path.basename(path)}")
+            QtWidgets.QApplication.processEvents()
+            return not progress.wasCanceled()
+
+        try:
+            self.session.load(paths, progress=report)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Spectrum Load Error", str(exc))
+        finally:
+            progress.close()
+        if self.session.load_warnings:
+            warnings = self.session.load_warnings
+            print('\n'.join(warnings))
+            detail = '\n'.join(warnings[:8])
+            if len(warnings) > 8:
+                detail += f'\n... and {len(warnings) - 8} more (see console).'
+            QtWidgets.QMessageBox.warning(self, "Missing CAP Spectra",
+                                          f'{len(warnings)} CAP spectra were not found:\n\n{detail}')
+        self._refresh_spectrum_list()
+        if was_empty and self.session.active_record:
+            self._plot_state_to_restore = dict(self.session.active_record.plot_state)
+        self._sync_active_record_controls(restore_plot=was_empty)
+        self.update_plot()
+        if self.show_summed_table_checkbox.isChecked():
+            self.show_summed_intensity_table()
+        if self.show_fitted_table_checkbox.isChecked():
+            self.show_fitted_intensity_table()
+
+    def _capture_plot_state(self):
+        state = dict(show_residual=self.residual_checkbox.isChecked(),
+                     show_background=self.background_checkbox.isChecked(),
+                     show_bg_elements=self.show_bg_elements_checkbox.isChecked(),
+                     x_range=self.x_range_combo.currentData(),
+                     normalization_line=self._plot_normalization_line())
+        if self.ax is not None:
+            state.update(xlim=list(self.ax.get_xlim()), ylim=list(self.ax.get_ylim()),
+                         yscale=self.ax.get_yscale())
+        return state
+
+    def _restore_plot_controls(self, rec):
+        state = rec.plot_state
+        for control, key in ((self.residual_checkbox, 'show_residual'),
+                             (self.background_checkbox, 'show_background'),
+                             (self.show_bg_elements_checkbox, 'show_bg_elements')):
+            if key in state:
+                with QtCore.QSignalBlocker(control):
+                    control.setChecked(bool(state[key]))
+        if 'yscale' in state:
+            with QtCore.QSignalBlocker(self.log_checkbox):
+                self.log_checkbox.setChecked(state['yscale'] == 'log')
+        if 'x_range' in state:
+            with QtCore.QSignalBlocker(self.x_range_combo):
+                self.x_range_combo.setCurrentIndex(self.x_range_combo.findData(state['x_range']))
 
     def remove_selected_spectrum(self):
         idx = self.list.currentRow()
@@ -1390,11 +1532,56 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
         if self.show_fitted_table_checkbox.isChecked():
             self.show_fitted_intensity_table()            
 
-    # --- Export helper and handler methods (moved out of __init__) ---
+    # --- Save helper and handler methods (moved out of __init__) ---
+    def _plot_normalization_line(self):
+        dialog = self.table_views.get("Fitted Line Intensities")
+        if dialog is not None and dialog.norm_idx is not None:
+            return dialog.line_names[dialog.norm_idx]
+        return None
+
+    def export_current_plot(self):
+        rec = self.session.active_record
+        if rec is None or self.fig is None or self.ax is None:
+            QtWidgets.QMessageBox.warning(self, "Save Plot", "No plot to save.")
+            return
+        try:
+            paths = self._run_with_progress('Save Plot', lambda: save_displayed_plot(
+                rec, self.fig, self.plot_format_entry.text(), self._plot_normalization_line(),
+                progress=self.session.progress_callback))
+            self.plot_format_entry.setToolTip("Saved:\n" + '\n'.join(map(str, paths)))
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Plot Save Failed", str(exc))
+
+    def export_all_plots(self):
+        rec = self.session.active_record
+        if rec is None or self.fig is None or self.ax is None:
+            QtWidgets.QMessageBox.warning(self, "Save Plots", "No plot to save.")
+            return
+        choice = QtWidgets.QMessageBox.question(
+            self, "Save All Plots", "Auto-rescale the Y axis for each spectrum within the current X limits?\n"
+            "Yes: rescale each spectrum. No: keep the current Y limits.\n"
+            "Images are saved beside each spectrum; existing images are replaced.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.No)
+        if choice == QtWidgets.QMessageBox.Cancel:
+            return
+        paths, errors = self._run_with_progress('Save All Plots', lambda: save_all_displayed_plots(
+            list(self.session.records.values()), rec, self.fig, self.ax,
+            formats=self.plot_format_entry.text(), auto_y=choice == QtWidgets.QMessageBox.Yes,
+            normalize_to=self._plot_normalization_line(),
+            plot_options=dict(show_residual=self.residual_checkbox.isChecked(),
+                              show_background=self.background_checkbox.isChecked(),
+                              show_bg_elements=self.show_bg_elements_checkbox.isChecked()),
+            progress=self.session.progress_callback))
+        if errors:
+            QtWidgets.QMessageBox.warning(self, "Plot Save", f"Saved {len(paths)} images.\n\n" + '\n'.join(errors))
+        else:
+            QtWidgets.QMessageBox.information(self, "Plot Save", f"Saved {len(paths)} images beside the spectrum files.")
+
     def _get_export_folder_and_formats(self):
         folder = None
         if self.ask_folder_checkbox.isChecked():
-            folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Export Folder")
+            folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Save Folder")
             if not folder:
                 return None, None  # User cancelled
         # Parse formats from entry (split by comma or space)
@@ -1410,29 +1597,34 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
     def export_selected_spectrum(self):
         rec = self.session.active_record
         if rec is None:
-            QtWidgets.QMessageBox.warning(self, "No Spectrum Selected", "Please select a spectrum to export.")
+            QtWidgets.QMessageBox.warning(self, "No Spectrum Selected", "Please select a spectrum to save.")
             return
         folder, formats = self._get_export_folder_and_formats()
         if formats is None:
             return  # Cancelled
         try:
-            rec.export(folder=folder, formats=formats)
-            QtWidgets.QMessageBox.information(self, "Export Complete", f"Exported '{rec.name}' to {folder or os.path.dirname(rec.path)} in formats: {', '.join(formats)}")
+            rec.plot_state = self._capture_plot_state()
+            self._run_with_progress("Save Spectrum", lambda: rec.export(
+                folder=folder, formats=formats, progress=self.session.progress_callback))
+            QtWidgets.QMessageBox.information(self, "Save Complete", f"Saved '{rec.name}' to {folder or os.path.dirname(rec.path)} in formats: {', '.join(formats)}")
         except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Export Error", str(e))
+            QtWidgets.QMessageBox.warning(self, "Save Error", str(e))
 
     def export_all_spectra(self):
         if not self.session.records:
-            QtWidgets.QMessageBox.warning(self, "No Spectra", "No spectra loaded to export.")
+            QtWidgets.QMessageBox.warning(self, "No Spectra", "No spectra loaded to save.")
             return
         folder, formats = self._get_export_folder_and_formats()
         if formats is None:
             return  # Cancelled
         try:
-            self.session.export_all(folder=folder, formats=formats)
-            QtWidgets.QMessageBox.information(self, "Export Complete", f"Exported all spectra to {folder or 'default folders'} in formats: {', '.join(formats)}")
+            state = self._capture_plot_state()
+            for record in self.session.records.values():
+                record.plot_state = dict(state)
+            self._run_with_progress("Save All Spectra", lambda: self.session.export_all(folder=folder, formats=formats))
+            QtWidgets.QMessageBox.information(self, "Save Complete", f"Saved all spectra to {folder or 'default folders'} in formats: {', '.join(formats)}")
         except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Export Error", str(e))
+            QtWidgets.QMessageBox.warning(self, "Save Error", str(e))
 
     def _refresh_spectrum_list(self):
         self.list.blockSignals(True)
@@ -1449,6 +1641,7 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
             self.list.setCurrentRow(0)
         self.list.blockSignals(False)
         self._update_spectrum_count_label()
+        self._sync_intensity_selection()
         if not self.session.records:
             self._update_background_label(None)
 
@@ -1596,15 +1789,20 @@ class NavigatorWidget(QtWidgets.QWidget if GUI_AVAILABLE else object):
 
 def main():
     p = argparse.ArgumentParser(description="EDS Spectrum Viewer")
-    p.add_argument("spectra", nargs="*", help="List of spectra files, or directories to search for .hspy/.eds files")
+    p.add_argument("spectra", nargs="*", help="Spectra files, CAP Data Explorer CSV files, or directories to search for .hspy/.eds files")
     p.add_argument("--elements", type=str, help="Comma‑separated element symbols (e.g. Fe,O,Cu)")
     p.add_argument("--bg-elements", type=str, help="Comma-separated background element symbols (e.g. Cu,Au,Cr)")
     p.add_argument("--bg-spectrum", type=str, help="Path to background spectrum file (.hspy or .eds)")
-    p.add_argument("--energy-resolution", type=float, default=128, help="Energy resolution FWHM at Mn Ka in eV (default: 128)")
+    p.add_argument("--energy-resolution", type=float, default=None, help="Override energy resolution FWHM at Mn Ka in eV (raw-file default: 128; saved calibration is preserved)")
     p.add_argument("--auto", action="store_true", help="Run automatic workflow without GUI: load spectra, compute intensities, export spectra/plots/table")
+    p.add_argument("--fit", action="store_true", help="With --auto: fit spectra, refine the first calibration, and reject poor fits")
     p.add_argument("--max-energy", type=float, default=None, help="Maximum energy (keV) for plot range in auto mode")
     p.add_argument("--cps", action="store_true", help="Use counts per second (CPS) units instead of counts")
     args = p.parse_args()
+    if args.fit and not args.auto:
+        p.error('--fit requires --auto')
+    if args.auto:
+        matplotlib.use('Agg')
     paths = collect_preferred_spectrum_paths(args.spectra)
     
     # if not paths:
@@ -1612,9 +1810,12 @@ def main():
     #     sys.exit(1)
     
     session = EDSSession(paths)
+    if args.auto and args.fit:
+        for record in session.records.values():
+            record.clear_fit(reset_calibration=False)
     
-    # Set energy resolution (default 128 eV)
-    session.set_energy_resolution(args.energy_resolution)
+    if args.energy_resolution is not None:
+        session.set_energy_resolution(args.energy_resolution)
     
     if args.elements:
         session.set_elements([e.strip() for e in args.elements.split(',') if e.strip()])
@@ -1626,11 +1827,13 @@ def main():
         
     if args.auto:
         # Run automatic workflow without GUI
-        auto_workflow(session, max_energy=args.max_energy, use_cps=args.cps)
+        success = auto_workflow(session, max_energy=args.max_energy, use_cps=args.cps, fit=args.fit)
+        if success is False:
+            sys.exit(2)
     else:
         # Start GUI
         if not GUI_AVAILABLE:
-            print("Error: GUI modules not available. Install qtpy and related packages.")
+            report_startup_failure(GUI_IMPORT_ERROR, show_dialog=True)
             sys.exit(1)
         matplotlib.use('QtAgg')
         app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)

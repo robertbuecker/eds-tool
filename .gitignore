@@ -19,5 +19,5 @@ dist-cx
 *.emsa
 *.hspy
 fine_tune_dump.txt
-eds_tool-cx.zip
 eds_tool*.zip
+thread_dump.txt

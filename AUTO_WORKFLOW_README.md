@@ -1,242 +1,72 @@
-# EDS Tool - Automatic Workflow CLI
+﻿# EDS Tool automatic workflow
 
-## Overview
+Run Python through `scripts/with-eds-mini.ps1` in the `eds-mini` environment.
 
-The EDS Tool now supports a command-line interface for automated batch processing of EDS spectra without launching the GUI. This is ideal for scripting, batch processing, and automated analysis pipelines.
-
-## Usage
-
-### Basic Auto Workflow
-
-```cmd
-python eds_tool.py --auto --elements Fe,O,Cu path/to/spectra/*.eds
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python eds_tool.py --auto --elements C,O,Cu spectra/
+powershell -ExecutionPolicy Bypass -File .\scripts\with-eds-mini.ps1 python eds_tool.py --auto --fit --elements C,O,Cu --bg-spectrum background.eds --max-energy 12 spectra/
 ```
 
-Or with a directory:
+Inputs may be EDS/HSPY files, directories scanned recursively, or explicit CAP
+Data Explorer CSVs. Same-stem HSPY snapshots take precedence over EDS files.
+CAP columns remain under `Signal.metadata.CAP_Data_Explorer.columns`.
+Directory scans do not read unrelated CSVs. Be deliberate about the input list:
+`--fit` calibrates on the first loaded spectrum, including a background spectrum
+if you explicitly include it in that list.
 
-```cmd
-python eds_tool.py --auto --elements Fe,O,Cu path/to/spectra/
-```
+Without `--fit`, the workflow computes peak sums. With `--fit`, it fits the
+first spectrum and refines its energy offset, detector resolution, and reference
+background shift. Remaining spectra receive that calibration and are fitted
+individually; background scale and line amplitudes remain individual fit values.
+A defined/embedded reference selects numerical reference-background fitting;
+otherwise fitting uses sample lines and polynomial continuum without an external
+background component. All fitting and quality diagnostics use CPS input.
 
-### With Maximum Energy Limit for Plots
+## Saved files
 
-```cmd
-python eds_tool.py --auto --elements Fe,O,Cu --max-energy 10 path/to/spectra/*.eds
-```
+Beside each input spectrum, the workflow writes EMSA, channel CSV, and HSPY,
+and PNG/SVG/JPG plots. HSPY preserves raw counts, fit settings/results, embedded
+reference and display mode. Existing corresponding outputs are overwritten on
+successful saving. `--cps` selects CPS for signal-only exports; model plots
+always use CPS. `--max-energy` sets figure X limits, not fitting limits.
 
-This limits the X-axis range of exported plots to 0-10 keV.
+Fitted plots contain the actual model and residual, with fit notes below the
+axes. When a reference is available, signal/model are shown with the fitted
+reference contribution subtracted; the polynomial continuum remains. Otherwise
+raw signal, fit and residual are shown. No GUI is opened.
 
-## What the Auto Workflow Does
+Summed intensities are saved individually and as a combined table in the common
+input directory. `--fit` also writes `fitted_intensities.csv`, including fitted
+standard errors. Plot/spectrum formats are configured by `AUTO_PLOT_FORMATS` and
+`AUTO_SPECTRUM_FORMATS` in `eds_tool.py`.
 
-The automatic workflow performs the following steps:
+## Fit rejection
 
-1. **Load Spectra**: Loads all specified EDS files (or recursively searches directories)
-2. **Set Elements**: Applies the element list from `--elements` to all spectra
-3. **Compute Intensities**: Calculates peak intensities using **summing method** (not fitting)
-4. **Export Spectra**: Saves each spectrum in multiple formats:
-   - EMSA format (`.emsa`)
-   - CSV format (`.csv`)
-   - Files saved in same folder as original `.eds` file
-5. **Export Plots**: Generates plots for each spectrum in multiple formats:
-   - PNG (`.png`)
-   - BMP (`.bmp`)
-   - SVG (`.svg`)
-   - Files saved in same folder as original `.eds` file
-6. **Export Intensity Table**: Creates a summary CSV table with all computed intensities
-   - Saved in the longest common folder of all input files
-   - Filename: `summed_intensities.csv`
-   - Format: Rows = spectra, Columns = element lines
+The automatic workflow warns and rejects poor fits rather than silently masking
+possible missing elements. Current conservative heuristic limits are:
 
-## Command-Line Arguments
+- At least 100 counts within the fit range; finite model and chi-square.
+- Final native reduced chi-square <= 10.
+- Significant unexplained positive peaks <= 3% of total positive signal area.
+  Channels must exceed both eight Poisson standard deviations and 3% of the
+  spectrum maximum, with at least three contiguous channels.
+- Negative model area <= 5% of total positive signal area.
+- Reference-background excess above measured signal <= 30% of that area.
 
-### Required Arguments
+Initial chi-square and unexplained peaks alone do not prevent first-spectrum
+refinement, because calibration can resolve them. Nonphysical initial models
+are rejected before refinement. Optimizer calls routed through the fitting
+helper have a 200-evaluation budget in auto mode (GUI defaults are unchanged).
+These checks identify tested failure modes, not every possible scientific error.
 
-- **spectra**: One or more `.eds` files or directories containing `.eds` files
-  - Can be individual files: `file1.eds file2.eds`
-  - Can be directories (searched recursively): `folder1/ folder2/`
-  - Can be glob patterns (in shells that support it): `data/**/*.eds`
+Each attempted spectrum gets `<name>.fit_quality.json`: decisions/reasons,
+metrics, fit/refine timings and per-step function-evaluation counts. Low-energy
+between-peak residual mean and mean absolute value are also recorded. Rejected
+models are cleared. Rejection of the first spectrum cancels the automatic run
+before spectrum/image saving, leaving any earlier output files untouched.
+A later rejection skips that fitted result and saves the record as unfitted.
+Any fit rejection gives exit status 2; successful runs give status 0.
 
-### Optional Arguments
-
-- `--elements ELEMENTS`: Comma-separated element symbols
-  - Example: `--elements Fe,O,Cu,Ni`
-  - Required if you want intensity calculations and element line markers on plots
-  
-- `--auto`: Enable automatic workflow mode (no GUI)
-  - Without this flag, the GUI will launch normally
-  
-- `--max-energy FLOAT`: Maximum energy in keV for plot X-axis
-  - Example: `--max-energy 10` limits plots to 0-10 keV range
-  - Default: Uses full spectrum range
-  - Only affects plot exports, not data exports
-
-- `--cps`: Use counts per second as unit instead of counts
-  - Recommended for comparison of spectra
-
-## Customizing Export Formats
-
-You can modify the export formats by editing the configuration at the top of `eds_tool.py`:
-
-```python
-# Configuration for auto workflow exports
-AUTO_SPECTRUM_FORMATS = ['emsa', 'csv']  # Formats for spectrum export
-AUTO_PLOT_FORMATS = ['png', 'bmp', 'svg']  # Formats for plot export
-```
-
-### Available Spectrum Formats
-
-- `'emsa'` - EMSA/MAS format (standard for EDS)
-- `'csv'` - Comma-separated values
-- Other formats supported by HyperSpy (check HyperSpy documentation)
-
-### Available Plot Formats
-
-- `'png'` - Portable Network Graphics (raster)
-- `'bmp'` - Bitmap (raster)
-- `'svg'` - Scalable Vector Graphics (vector)
-- `'pdf'` - Portable Document Format (vector)
-- `'jpg'` or `'jpeg'` - JPEG (raster, compressed)
-- `'tiff'` or `'tif'` - Tagged Image File Format (raster)
-- `'eps'` - Encapsulated PostScript (vector)
-
-## Example Workflows
-
-### Process All Spectra in a Folder
-
-```cmd
-python eds_tool.py --auto --elements Fe,O,Si,Al samples/
-```
-
-### Process Specific Files with Energy Limit
-
-```cmd
-python eds_tool.py --auto --elements Cu,Ni --max-energy 12 sample1.eds sample2.eds sample3.eds
-```
-
-### Batch Processing Script (Windows)
-
-Create a batch file `process_all.bat`:
-
-```cmd
-@echo off
-python eds_tool.py --auto --elements Fe,O,Cu,Ni,Cr --max-energy 15 data\batch1\
-python eds_tool.py --auto --elements Fe,O,Cu --max-energy 10 data\batch2\
-echo Processing complete!
-pause
-```
-
-### Bash Script (Linux/Mac)
-
-Create a shell script `process_all.sh`:
-
-```bash
-#!/bin/bash
-python eds_tool.py --auto --elements Fe,O,Cu,Ni,Cr --max-energy 15 data/batch1/
-python eds_tool.py --auto --elements Fe,O,Cu --max-energy 10 data/batch2/
-echo "Processing complete!"
-```
-
-## Output File Locations
-
-### Spectrum and Plot Files
-
-Each spectrum's exported files are saved **in the same folder as the original `.eds` file**:
-
-```
-original_folder/
-├── spectrum1.eds          (original)
-├── spectrum1.emsa         (exported)
-├── spectrum1.csv          (exported)
-├── spectrum1.png          (exported plot)
-├── spectrum1.bmp          (exported plot)
-└── spectrum1.svg          (exported plot)
-```
-
-### Intensity Table
-
-The intensity table is saved in the **longest common folder** of all input files:
-
-**Example 1** - All files in same folder:
-```
-data/
-├── spectrum1.eds
-├── spectrum2.eds
-└── summed_intensities.csv  ← saved here
-```
-
-**Example 2** - Files in different subfolders:
-```
-data/
-├── batch1/
-│   └── spectrum1.eds
-├── batch2/
-│   └── spectrum2.eds
-└── summed_intensities.csv  ← saved here (common parent)
-```
-
-## Differences from GUI Mode
-
-| Feature | GUI Mode | Auto Mode |
-|---------|----------|-----------|
-| Interactive | Yes | No |
-| Element selection | Manual per spectrum | Applied to all from CLI |
-| Intensity method | Summing or Fitting | **Summing only** |
-| Export formats | User selects | Configured in code |
-| Plot display | Interactive matplotlib | Saved to files |
-| Progress feedback | Visual | Console output |
-
-## Troubleshooting
-
-### No Intensities Computed
-
-**Symptom**: Output shows "Intensities computed for 0/N spectra"
-
-**Solution**: Make sure you specified `--elements`:
-```cmd
-python eds_tool.py --auto --elements Fe,O,Cu spectra/
-```
-
-### No Common Folder for Intensity Table
-
-**Symptom**: Warning "Could not determine common folder for intensity table"
-
-**Cause**: Input files have no common parent folder (e.g., from different drives)
-
-**Solution**: Provide files from a common directory structure, or the table won't be saved
-
-### Module Not Found Errors
-
-**Symptom**: `ModuleNotFoundError` when running
-
-**Solution**: Make sure you're in the correct conda environment:
-```cmd
-conda activate eds-tools
-python eds_tool.py --auto ...
-```
-
-## Integration with Other Tools
-
-The auto workflow is designed to integrate easily with:
-
-- **Batch scripts** for automated processing
-- **Python scripts** calling `subprocess` or `os.system()`
-- **Make/CMake** build systems for reproducible analysis
-- **CI/CD pipelines** for automated testing
-- **Job schedulers** for HPC environments
-
-## Future Enhancements
-
-Potential additions (not yet implemented):
-
-- [ ] Add `--fit` option to use fitting instead of summing
-- [ ] Add `--output-dir` to specify custom output location
-- [ ] Add `--formats` CLI argument to override default formats
-- [ ] Add `--parallel` for multi-threaded processing
-- [ ] Add JSON output format for machine-readable results
-- [ ] Add progress bar for large batches
-
-## See Also
-
-- Main README for GUI usage
-- `OPTIMIZATION_NOTES.md` for build optimization details
-- `BUILD_README.md` for creating standalone executables
+`--fit` requires `--auto`. `--energy-resolution` explicitly overrides detector
+resolution; otherwise saved calibration is retained and raw EDS defaults to
+128 eV. `--elements` overrides the sample element list.

@@ -61,11 +61,11 @@ def main():
     assert abs(loaded.reduced_chisq - initial_chisq) < 1e-12, "Reduced chi-square changed during .hspy round-trip"
     assert abs(loaded.get_energy_resolution() - initial_resolution) < 1e-12, "Resolution changed during round-trip"
     assert abs(loaded.get_signal_for_fit().axes_manager.signal_axes[0].offset - initial_offset) < 1e-12, "Offset changed during round-trip"
-    print("✓ .hspy load restored fit settings and fitted model state")
+    print(" .hspy load restored fit settings and fitted model state")
 
     loaded.fit_model()
     assert abs(loaded.reduced_chisq - initial_chisq) < 1e-12, "Re-fitting a loaded .hspy changed the fitted result"
-    print("✓ Re-fitting a loaded .hspy preserves the fitted result")
+    print(" Re-fitting a loaded .hspy preserves the fitted result")
 
     copied_eds = os.path.join(TMP_DIR, f"{rec.name}.eds")
     shutil.copyfile(SPEC_FILE, copied_eds)
@@ -76,7 +76,7 @@ def main():
     assert len(session.records) == 1, "Session should only load one preferred spectrum for identical basenames"
     active = session.active_record
     assert active is not None and active.path.lower().endswith(".hspy"), "Session did not prefer .hspy on load"
-    print("✓ Session loading prefers .hspy when both .eds and .hspy exist")
+    print(" Session loading prefers .hspy when both .eds and .hspy exist")
 
     shutil.rmtree(TMP_DIR, ignore_errors=True)
     print("\nAll .hspy round-trip checks passed")
